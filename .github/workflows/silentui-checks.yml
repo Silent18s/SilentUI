@@ -1,0 +1,28 @@
+name: SilentUI static checks
+
+on:
+  push:
+    paths:
+      - "src/SilentUI/**"
+      - "examples/**"
+      - "tests/**"
+      - "default.project.json"
+      - ".github/workflows/silentui-checks.yml"
+  pull_request:
+    paths:
+      - "src/SilentUI/**"
+      - "examples/**"
+      - "tests/**"
+      - "default.project.json"
+      - ".github/workflows/silentui-checks.yml"
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Run static contracts
+        run: python -m unittest discover -s tests -p "*_contracts.py" -v
