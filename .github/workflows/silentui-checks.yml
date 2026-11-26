@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - "src/SilentUI/**"
+      - "dist/**"
       - "examples/**"
       - "tests/**"
       - "default.project.json"
@@ -11,6 +12,7 @@ on:
   pull_request:
     paths:
       - "src/SilentUI/**"
+      - "dist/**"
       - "examples/**"
       - "tests/**"
       - "default.project.json"
@@ -24,7 +26,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
-      - name: Check library source contracts
+      - name: Check modular library source
         run: python tests/static_contracts.py
       - name: Check showcase public API coverage
         run: python tests/showcase_contracts.py
+      - name: Check executor bundles and entry points
+        run: python tests/executor_contracts.py

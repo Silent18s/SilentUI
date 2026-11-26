@@ -4,8 +4,9 @@
 -- UI-only playground: no game data or character state is modified.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local LibraryModule = require(ReplicatedStorage:WaitForChild("SilentUI"))
-local Library = LibraryModule.new({ Theme = "Dark", Language = "en", NotificationPoolSize = 8 })
+local Library = require(ReplicatedStorage:WaitForChild("SilentUI"))
+Library:SetTheme("Dark", false)
+Library:SetLanguage("en")
 
 Library:RegisterLocale("en", { welcome = "All showcase systems are ready." })
 Library:RegisterLocale("es", { welcome = "Todos los sistemas están listos." })
