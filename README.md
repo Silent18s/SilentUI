@@ -6,8 +6,8 @@ Professional, standalone Roblox UI library written in Luau.
 - \`src/SilentUI/\` — ModuleScript source (\`Core\`, \`UI\`, \`init.luau\`).
 - \`examples/Basic.client.luau\` — minimal LocalScript example.
 - \`examples/Showcase.client.luau\` — complete interactive UI playground.
-- \`docs/\` — architecture, API, feature inventory, and testing guidance.
-- \`tests/\` — static contract checks and manual Studio smoke test.
+- \`docs/\` — architecture, API, feature inventory, and test guidance.
+- \`tests/\` — static contract checks and a manual Studio smoke test.
 
 ## Install with Rojo
 1. Install Rojo and the Roblox Studio plugin.
@@ -37,7 +37,14 @@ Section:Button({
 Run \`examples/Showcase.client.luau\` to explore eight pages: Overview, Controls, Components, Layout, Feedback, Settings, Runtime, and Diagnostics. It is UI-only and does not modify game state.
 
 ## Verification
-Run \`python -m unittest discover -s tests -p "*_contracts.py" -v\`. These are static tests, not a Luau compiler or runtime test. Complete \`tests/StudioSmokeTest.client.luau\` and \`docs/TEST_CHECKLIST.md\` in Roblox Studio before production.
+Run both static contracts directly:
+
+\`\`\`bash
+python tests/static_contracts.py
+python tests/showcase_contracts.py
+\`\`\`
+
+These checks are not a Luau compiler or runtime test. Complete \`tests/StudioSmokeTest.client.luau\` and \`docs/TEST_CHECKLIST.md\` in Roblox Studio before production.
 
 ## Scope
 SilentUI has no game-specific scripts, external service integrations, executor APIs, loaders, or authentication systems. Its default config adapter is in-memory; the host may inject a permitted storage adapter.
