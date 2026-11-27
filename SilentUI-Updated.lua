@@ -1,3 +1,4 @@
+--!nonstrict
 local TweenService      = game:GetService("TweenService")
 local Players           = game:GetService("Players")
 local UserInputService  = game:GetService("UserInputService")
@@ -6,6 +7,7 @@ local TextService       = game:GetService("TextService")
 local Lighting          = game:GetService("Lighting")
 local HttpService       = game:GetService("HttpService")
 local GuiService        = game:GetService("GuiService")
+local AssetService      = game:GetService("AssetService")
  
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
@@ -22,6 +24,30 @@ SilentUI.ConfigValidators = {}
 SilentUI.FlagMigrations = {}
 SilentUI._NextControlRegistration = 0
 SilentUI._Windows = {}
+
+--[[
+    SILENTUI
+    Change these values before distributing the library.
+    Background.Image accepts an asset ID, rbxassetid:// reference or HTTPS image URL.
+    Leave Discord Invite / Replacement empty to use the built-in SilentUI invitations.
+]]
+
+SilentUI.DefaultDiscordInvite = "https://discord.gg/k3SVsV7sXs"
+SilentUI.DefaultDiscordReplacement = "https://discord.gg/HnGeFAXmdH"
+SilentUI.Defaults = {
+    Title = "SilentUI",
+    Subtitle = "Community UI Library",
+    Background = {
+        Image = "",
+        ImageTransparency = 0.22,
+        LauncherTransparency = 0.18,
+        UseImageAccent = false,
+    },
+    Discord = {
+        Invite = "",
+        Replacement = "",
+    },
+}
  
 function Private.GetGlobalTable()
 	local ok, g = pcall(function()
@@ -83,6 +109,7 @@ end
  
 local LibJanitor = Janitor.new()
 
+-- Public resource scopes can own connections, Instances, Drawing objects, tasks and cleanups.
 local ResourceScope = {}
 ResourceScope.__index = ResourceScope
 local ActiveScopes = {}
@@ -333,7 +360,7 @@ function SilentUI:ValidateLocale(language, referenceLanguage)
 	local report = { Language = language, Reference = referenceLanguage, Missing = {}, Invalid = {} }
 	for key in pairs(keys) do
 		if locale[key] == nil then
-
+			-- English is the identity locale, so untranslated source strings are valid.
 			if language ~= "en" then table.insert(report.Missing, key) end
 		elseif not Private.IsValidTranslation(locale[key]) then
 			table.insert(report.Invalid, key)
@@ -2522,6 +2549,19 @@ function SilentUI:Modal(opts)
 	return { Close = close }
 end
  
+function Private.PlayEdgeBounce(guiObject)
+	if not guiObject or not guiObject.Parent then return end
+	local scale = guiObject:FindFirstChild("SilentEdgeBounceScale")
+	if not scale then
+		scale = Instance.new("UIScale")
+		scale.Name = "SilentEdgeBounceScale"
+		scale.Scale = 1
+		scale.Parent = guiObject
+	end
+	scale.Scale = 0.975
+	Tween(scale, { Scale = 1 }, 0.34, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out)
+end
+
 local DRAG_SMOOTH_SPEED = 22
  
 function Private.SetupSmoothDrag(frame, handle, janitor)
@@ -2532,6 +2572,7 @@ function Private.SetupSmoothDrag(frame, handle, janitor)
  
 	local dragging = false
 	local settling = false
+	local edgeFeedback = false
 	local mouseOffset = Vector2.zero
 	local activeInput = nil
  
@@ -2555,12 +2596,12 @@ function Private.SetupSmoothDrag(frame, handle, janitor)
 		local view = Private.ViewportSize()
 		local size = frame.AbsoluteSize
 		local anchor = frame.AnchorPoint
-		local minVisible = 60
 		local left = pos.X - size.X * anchor.X
-		local top  = pos.Y - size.Y * anchor.Y
-		left = SafeClamp(left, -size.X + minVisible, view.X - minVisible)
-
-		top  = SafeClamp(top, -GuiService:GetGuiInset().Y, view.Y - minVisible)
+		local top = pos.Y - size.Y * anchor.Y
+		local maxLeft = math.max(0, view.X - size.X)
+		local maxTop = math.max(0, view.Y - size.Y)
+		left = SafeClamp(left, 0, maxLeft)
+		top = SafeClamp(top, 0, maxTop)
 		return Vector2.new(left + size.X * anchor.X, top + size.Y * anchor.Y)
 	end
  
@@ -2596,9 +2637,16 @@ function Private.SetupSmoothDrag(frame, handle, janitor)
 			and activeInput and input ~= activeInput then
 			return
 		end
-		targetPosition = clampToScreen(
-			Vector2.new(input.Position.X, input.Position.Y) - mouseOffset
-		)
+		local rawPosition = Vector2.new(input.Position.X, input.Position.Y) - mouseOffset
+		local clampedPosition = clampToScreen(rawPosition)
+		local outside = (rawPosition - clampedPosition).Magnitude > 1
+		if outside and not edgeFeedback then
+			edgeFeedback = true
+			Private.PlayEdgeBounce(frame)
+		elseif not outside then
+			edgeFeedback = false
+		end
+		targetPosition = clampedPosition
 	end))
  
 	janitor:Add(UserInputService.InputEnded:Connect(function(input)
@@ -2607,6 +2655,7 @@ function Private.SetupSmoothDrag(frame, handle, janitor)
 				and input.UserInputType == Enum.UserInputType.MouseButton1) then
 			dragging = false
 			activeInput = nil
+			edgeFeedback = false
 		end
 	end))
  
@@ -2638,6 +2687,7 @@ function Private.SetupResize(frame, handle, janitor, opts)
 	local onResize = opts.OnResize
  
 	local resizing = false
+	local resizingEdgeFeedback = false
 	local startSize, startTopLeft, startInput, activeInput
  
 	janitor:Add(handle.InputBegan:Connect(function(input)
@@ -2666,10 +2716,18 @@ function Private.SetupResize(frame, handle, janitor, opts)
  
 		local view = Private.ViewportSize()
 		local delta = Vector2.new(input.Position.X, input.Position.Y) - startInput
-		local maxW = math.max(view.X - startTopLeft.X - 8, 100)
-		local maxH = math.max(view.Y - startTopLeft.Y - 8, 100)
-		local newW = SafeClamp(startSize.X + delta.X, math.min(minSize.X, maxW), maxW)
-		local newH = SafeClamp(startSize.Y + delta.Y, math.min(minSize.Y, maxH), maxH)
+		local maxW = math.max(1, view.X - startTopLeft.X - 2)
+		local maxH = math.max(1, view.Y - startTopLeft.Y - 2)
+		local rawW = startSize.X + delta.X
+		local rawH = startSize.Y + delta.Y
+		if (rawW > maxW or rawH > maxH) and not resizingEdgeFeedback then
+			resizingEdgeFeedback = true
+			Private.PlayEdgeBounce(frame)
+		elseif rawW <= maxW and rawH <= maxH then
+			resizingEdgeFeedback = false
+		end
+		local newW = SafeClamp(rawW, math.min(minSize.X, maxW), maxW)
+		local newH = SafeClamp(rawH, math.min(minSize.Y, maxH), maxH)
  
 		local s = GetUIScale()
 		frame.Size = UDim2.fromOffset(math.round(newW / s), math.round(newH / s))
@@ -2687,6 +2745,7 @@ function Private.SetupResize(frame, handle, janitor, opts)
 			or (activeInput and activeInput.UserInputType == Enum.UserInputType.MouseButton1
 				and input.UserInputType == Enum.UserInputType.MouseButton1) then
 			resizing = false
+			resizingEdgeFeedback = false
 			activeInput = nil
 			if onResize then onResize(frame.Size, true) end
 		end
@@ -2887,29 +2946,51 @@ Private.NextWindowId = 0
  
 function SilentUI:CreateWindow(opts)
 	opts = opts or {}
+	opts.Title = opts.Title or SilentUI.Defaults.Title or "SilentUI"
+	opts.Subtitle = opts.Subtitle or SilentUI.Defaults.Subtitle or nil
+	local backgroundDefaults = SilentUI.Defaults.Background or {}
+	if opts.BackgroundImage == nil then opts.BackgroundImage = backgroundDefaults.Image end
+	if type(opts.BackgroundImage) == "number" then
+		opts.BackgroundImage = "rbxassetid://" .. tostring(opts.BackgroundImage)
+	elseif type(opts.BackgroundImage) == "string" and opts.BackgroundImage:match("^%d+$") then
+		opts.BackgroundImage = "rbxassetid://" .. opts.BackgroundImage
+	end
+	if opts.BackgroundImageTransparency == nil then
+		opts.BackgroundImageTransparency = backgroundDefaults.ImageTransparency or 0.22
+	end
+	local initialBackgroundImage = opts.BackgroundImage
 	if opts.RootMode ~= nil then
 		local ok, err = self:SetRootMode(opts.RootMode)
 		if not ok then error(err, 2) end
 	end
 	if self.SetConfigFolder then self:SetConfigFolder(opts.Folder) end
 	if self.LoadAutoConfig then self:LoadAutoConfig() end
+	local viewport = Private.ViewportSize()
+	local initialScale = GetUIScale()
+	local logicalViewport = viewport / initialScale
 	local size = opts.Size or UDim2.fromOffset(605, 405)
- 
-	if IsMobileDevice then
-
-		local vp = Private.ViewportSize()
-		local s = GetUIScale()
+	if IsMobileDevice and opts.Size == nil then
 		size = UDim2.fromOffset(
-			math.floor((vp.X / s) * 0.64),
-			math.floor((vp.Y / s) * 0.96)
+			math.floor(logicalViewport.X * 0.94),
+			math.floor(logicalViewport.Y * 0.90)
 		)
 	end
+	local maxWindowWidth = math.max(1, logicalViewport.X - 20)
+	local maxWindowHeight = math.max(1, logicalViewport.Y - 20)
+	local requestedWidth = size.X.Scale == 0 and size.X.Offset
+		or math.floor(logicalViewport.X * size.X.Scale + size.X.Offset)
+	local requestedHeight = size.Y.Scale == 0 and size.Y.Offset
+		or math.floor(logicalViewport.Y * size.Y.Scale + size.Y.Offset)
+	size = UDim2.fromOffset(
+		math.clamp(requestedWidth, math.min(240, maxWindowWidth), maxWindowWidth),
+		math.clamp(requestedHeight, math.min(200, maxWindowHeight), maxWindowHeight)
+	)
 	local margin = SilentUI.Theme.Margin
  
 	local root = SilentUI._Root
 	local jan = Janitor.new()
 	local windowPosition = UDim2.fromScale(0.5, IsMobileDevice and 0.5 or 0.55)
-
+	-- Keep the shadow outside main because main clips its children.
 	local shadow = Instance.new("ImageLabel")
 	shadow.Name = "WindowShadow"
 	shadow.BackgroundTransparency = 1
@@ -2933,9 +3014,9 @@ function SilentUI:CreateWindow(opts)
 	main.AnchorPoint = Vector2.new(0.5, 0.5)
 	main.Position = windowPosition
 	main.Size = size
-	main.Image = type(opts.BackgroundImage) == "string" and opts.BackgroundImage or ""
+	main.Image = type(initialBackgroundImage) == "string" and initialBackgroundImage or ""
 	main.ImageColor3 = Color3.new(1, 1, 1)
-	main.ImageTransparency = math.clamp(tonumber(opts.BackgroundImageTransparency) or 0, 0, 1)
+	main.ImageTransparency = main.Image ~= "" and math.clamp(tonumber(opts.BackgroundImageTransparency) or 0.22, 0, 1) or 1
 	main.ScaleType = Enum.ScaleType.Crop
 	main.BackgroundColor3 = SilentUI.Theme.Background
 	main.BackgroundTransparency = 1
@@ -2946,6 +3027,10 @@ function SilentUI:CreateWindow(opts)
 	Corner(main, SilentUI.Theme.CornerRadius)
 	Stroke(main, SilentUI.Theme.Border, 1, 0.92)
 	Private.GlassLayer(main, SilentUI.Theme.CornerRadius, 0.985)
+	local windowAnimationScale = Instance.new("UIScale")
+	windowAnimationScale.Name = "SilentWindowAnimationScale"
+	windowAnimationScale.Scale = 1
+	windowAnimationScale.Parent = main
 
 	Private.NextWindowId += 1
 	local windowId = Private.NextWindowId
@@ -3162,11 +3247,22 @@ function SilentUI:CreateWindow(opts)
 	end))
  
 	Tween(main, { BackgroundTransparency = 0.15 }, 0.6, Enum.EasingStyle.Exponential)
+	if main.Image ~= "" then
+		task.defer(function()
+			if main.Parent then
+				Tween(main, {
+					ImageTransparency = math.clamp(tonumber(opts.BackgroundImageTransparency) or 0.22, 0, 1),
+				}, 0.52, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+			end
+		end)
+	end
  
 	local self = setmetatable({
 		_id             = windowId,
 		_gui            = main,
 		_backgroundImage = main,
+		_backgroundImageTransparency = math.clamp(tonumber(opts.BackgroundImageTransparency) or 0.22, 0, 1),
+		_animationScale = windowAnimationScale,
 		_shadow         = shadow,
 		_content        = content,
 		_tabBar         = tabBar,
@@ -3192,14 +3288,36 @@ function SilentUI:CreateWindow(opts)
 	}, Window)
  
 	table.insert(SilentUI._Windows, self)
- 
-	if opts.Draggable ~= false then
+
+	local function fitWindowToViewport()
+		if self._destroyed or not main.Parent then return end
+		local view = Private.ViewportSize()
+		local scale = math.max(GetUIScale(), 0.01)
+		local maxW = math.max(1, view.X / scale - 20)
+		local maxH = math.max(1, view.Y / scale - 20)
+		local preferred = self._normalSize or main.Size
+		local wantedW = preferred.X.Scale == 0 and preferred.X.Offset or (view.X / scale) * preferred.X.Scale + preferred.X.Offset
+		local wantedH = preferred.Y.Scale == 0 and preferred.Y.Offset or (view.Y / scale) * preferred.Y.Scale + preferred.Y.Offset
+		local fitted = UDim2.fromOffset(math.max(1, math.min(wantedW, maxW)), math.max(1, math.min(wantedH, maxH)))
+		if math.abs(main.AbsoluteSize.X / scale - fitted.X.Offset) > 1
+			or math.abs(main.AbsoluteSize.Y / scale - fitted.Y.Offset) > 1 then
+			main.Size = fitted
+		end
+		main.Position = UDim2.fromOffset(view.X / scale * 0.5, view.Y / scale * 0.52)
+		if self._drag then self._drag.Sync() end
+	end
+	jan:Add(root:GetPropertyChangedSignal("AbsoluteSize"):Connect(fitWindowToViewport))
+	jan:Add(GlobalScale:GetPropertyChangedSignal("Scale"):Connect(fitWindowToViewport))
+	task.defer(fitWindowToViewport)
+
+		if opts.Draggable ~= false then
 		self._drag = Private.SetupSmoothDrag(main, topbar, jan)
 	end
  
 	if opts.Resizable ~= false then
 		Private.SetupResize(main, resizeHandle, jan, {
-
+			-- No mobile o minimo nao pode ser maior que a janela ja clampada, senao um
+			-- resize devolve a janela pro tamanho cortado.
 			MinSize = Vector2.new(
 				math.min((opts.MinSize or Vector2.new(420, 300)).X, size.X.Offset),
 				math.min((opts.MinSize or Vector2.new(420, 300)).Y, size.Y.Offset)
@@ -3311,7 +3429,36 @@ function SilentUI:CreateWindow(opts)
 		launcher.ZIndex = Z.Toast + 1
 		launcher.Visible = false
 		launcher.Parent = launcherSurface
+		launcher.ClipsDescendants = true
 		Corner(launcher, 12)
+
+		local launcherBackground = Instance.new("ImageLabel")
+		launcherBackground.Name = "LauncherBackground"
+		launcherBackground.BackgroundTransparency = 1
+		launcherBackground.Image = type(initialBackgroundImage) == "string" and initialBackgroundImage or ""
+		launcherBackground.ImageColor3 = Color3.new(1, 1, 1)
+		launcherBackground.ImageTransparency = launcherBackground.Image ~= ""
+			and math.clamp(tonumber(backgroundDefaults.LauncherTransparency) or 0.18, 0, 1) or 1
+		launcherBackground.ScaleType = Enum.ScaleType.Crop
+		launcherBackground.Size = UDim2.fromScale(1, 1)
+		launcherBackground.ZIndex = launcher.ZIndex
+		launcherBackground.Active = false
+		launcherBackground.Parent = launcher
+
+		local launcherShade = Instance.new("Frame")
+		launcherShade.Name = "LauncherBackgroundShade"
+		launcherShade.BackgroundColor3 = Color3.new(0, 0, 0)
+		launcherShade.BackgroundTransparency = 0.48
+		launcherShade.BorderSizePixel = 0
+		launcherShade.Size = UDim2.fromScale(1, 1)
+		launcherShade.ZIndex = launcher.ZIndex + 1
+		launcherShade.Active = false
+		launcherShade.Parent = launcher
+
+		local launcherAnimationScale = Instance.new("UIScale")
+		launcherAnimationScale.Name = "SilentLauncherAnimationScale"
+		launcherAnimationScale.Scale = 1
+		launcherAnimationScale.Parent = launcher
 		local launcherStroke = Stroke(launcher, SilentUI.Theme.Border, 1, 0.28)
 
 		local logoHolder = Instance.new("Frame")
@@ -3319,9 +3466,10 @@ function SilentUI:CreateWindow(opts)
 		logoHolder.BackgroundTransparency = 1
 		logoHolder.Position = UDim2.fromOffset(11, math.floor((buttonHeight - 24) / 2))
 		logoHolder.Size = UDim2.fromOffset(24, 24)
-		logoHolder.ZIndex = launcher.ZIndex + 1
+		logoHolder.ZIndex = launcher.ZIndex + 2
 		logoHolder.Parent = launcher
 
+		local launcherLogoText
 		local toggleImage = opts.FloatingButtonImage or opts.MobileToggleImage or opts.ToggleImage
 		if type(toggleImage) == "string" and toggleImage ~= "" then
 			local image = Instance.new("ImageLabel")
@@ -3361,7 +3509,7 @@ function SilentUI:CreateWindow(opts)
 		launcherTitle.TextTruncate = Enum.TextTruncate.AtEnd
 		launcherTitle.Position = UDim2.fromOffset(45, 5)
 		launcherTitle.Size = UDim2.new(1, -55, 0, 18)
-		launcherTitle.ZIndex = launcher.ZIndex + 1
+		launcherTitle.ZIndex = launcher.ZIndex + 2
 		launcherTitle.Parent = launcher
 		self._launcherTitle = launcherTitle
 
@@ -3376,15 +3524,16 @@ function SilentUI:CreateWindow(opts)
 		launcherHint.TextYAlignment = Enum.TextYAlignment.Center
 		launcherHint.Position = UDim2.fromOffset(45, 23)
 		launcherHint.Size = UDim2.new(1, -55, 0, 13)
-		launcherHint.ZIndex = launcher.ZIndex + 1
+		launcherHint.ZIndex = launcher.ZIndex + 2
 		launcherHint.Parent = launcher
 
 		self._launcher = launcher
+		self._launcherBackground = launcherBackground
+		self._launcherAnimationScale = launcherAnimationScale
 		self._launcherGui = launcherGui
 		self._launcherSurface = launcherSurface
 		self._launcherStroke = launcherStroke
 
-		local launcherLogoText
 		local launcherMoved = configuredPosition ~= nil
 		local function clampLauncher()
 			local bounds = launcherSurface.AbsoluteSize
@@ -3400,13 +3549,33 @@ function SilentUI:CreateWindow(opts)
 
 		local function fitLauncher()
 			local bounds = launcherSurface.AbsoluteSize
-			if bounds.X < 1 then return end
-			local responsiveWidth = math.max(112, math.min(buttonWidth, bounds.X - 20))
-			launcher.Size = UDim2.fromOffset(responsiveWidth, buttonHeight)
-			launcherTitle.Size = UDim2.new(1, -55, 0, 18)
-			launcherHint.Size = UDim2.new(1, -55, 0, 13)
+			if bounds.X < 1 or bounds.Y < 1 then return end
+			local availableWidth = math.max(1, bounds.X - 12)
+			local availableHeight = math.max(1, bounds.Y - 12)
+			local responsiveWidth = math.min(buttonWidth, availableWidth)
+			local responsiveHeight = math.min(buttonHeight, availableHeight)
+			launcher.Size = UDim2.fromOffset(responsiveWidth, responsiveHeight)
+			local showText = responsiveWidth >= 118 and responsiveHeight >= 38
+			launcherTitle.Visible = showText
+			launcherHint.Visible = showText
+			if showText then
+				if launcherLogoText then launcherLogoText.TextSize = 23 end
+				logoHolder.Position = UDim2.fromOffset(11, math.floor((responsiveHeight - 24) / 2))
+				logoHolder.Size = UDim2.fromOffset(24, 24)
+				launcherTitle.Position = UDim2.fromOffset(45, 5)
+				launcherTitle.Size = UDim2.new(1, -55, 0, 18)
+				launcherHint.Position = UDim2.fromOffset(45, 23)
+				launcherHint.Size = UDim2.new(1, -55, 0, 13)
+			else
+				local iconSize = math.max(1, math.min(24, responsiveHeight - 6, responsiveWidth - 8))
+				logoHolder.Size = UDim2.fromOffset(iconSize, iconSize)
+				logoHolder.Position = UDim2.new(0.5, -iconSize / 2, 0.5, -iconSize / 2)
+				if launcherLogoText then launcherLogoText.TextSize = math.max(8, iconSize * 0.92) end
+				launcherTitle.Size = UDim2.fromOffset(0, 0)
+				launcherHint.Size = UDim2.fromOffset(0, 0)
+			end
 			if not launcherMoved then
-				launcher.Position = UDim2.new(0.5, -math.floor(responsiveWidth / 2), 0, 16)
+				launcher.Position = UDim2.new(0.5, -math.floor(responsiveWidth / 2), 0.5, -math.floor(responsiveHeight / 2))
 			end
 			clampLauncher()
 		end
@@ -3414,6 +3583,7 @@ function SilentUI:CreateWindow(opts)
 		task.defer(fitLauncher)
 
 		local dragInput, dragStart, dragStartPosition, dragged
+		local launcherEdgeFeedback = false
 		jan:Add(launcher.InputBegan:Connect(function(input)
 			if input.UserInputType ~= Enum.UserInputType.Touch
 				and input.UserInputType ~= Enum.UserInputType.MouseButton1 then
@@ -3439,11 +3609,22 @@ function SilentUI:CreateWindow(opts)
 				launcherMoved = true
 			end
 			if dragged then
-				launcher.Position = UDim2.new(
-					dragStartPosition.X.Scale, dragStartPosition.X.Offset + delta.X,
-					dragStartPosition.Y.Scale, dragStartPosition.Y.Offset + delta.Y
-				)
-				clampLauncher()
+				local bounds = launcherSurface.AbsoluteSize
+				local sizeNow = launcher.AbsoluteSize
+				local rawX = dragStartPosition.X.Scale * bounds.X + dragStartPosition.X.Offset + delta.X
+				local rawY = dragStartPosition.Y.Scale * bounds.Y + dragStartPosition.Y.Offset + delta.Y
+				local maxX = math.max(0, bounds.X - sizeNow.X)
+				local maxY = math.max(0, bounds.Y - sizeNow.Y)
+				local targetX = math.clamp(rawX, 0, maxX)
+				local targetY = math.clamp(rawY, 0, maxY)
+				local outside = math.abs(rawX - targetX) > 1 or math.abs(rawY - targetY) > 1
+				if outside and not launcherEdgeFeedback then
+					launcherEdgeFeedback = true
+					Private.PlayEdgeBounce(launcher)
+				elseif not outside then
+					launcherEdgeFeedback = false
+				end
+				launcher.Position = UDim2.fromOffset(targetX, targetY)
 			end
 		end))
 
@@ -3455,6 +3636,7 @@ function SilentUI:CreateWindow(opts)
 			end
 			local shouldOpen = not dragged
 			dragInput, dragStart, dragStartPosition, dragged = nil, nil, nil, nil
+			launcherEdgeFeedback = false
 			if shouldOpen and self._state == "closed" then
 				self:Open()
 			end
@@ -3469,9 +3651,17 @@ function SilentUI:CreateWindow(opts)
 			if launcherStroke then Tween(launcherStroke, { Transparency = 0.28 }, 0.12) end
 		end))
 	end
+	if initialBackgroundImage and initialBackgroundImage ~= "" and backgroundDefaults.UseImageAccent == true then
+		task.defer(function()
+			if not self._destroyed then
+				local accentOk, accentError = SilentUI:SetBackgroundAccentFromImage(initialBackgroundImage)
+				if not accentOk then warn("[SilentUI] initial background accent unavailable: " .. tostring(accentError)) end
+			end
+		end)
+	end
 	return self
 end
- 
+
 function Window:SetTitle(title, subtitle)
 	if self._titleLabel then self._titleLabel.Text = title or self._titleLabel.Text end
 	if subtitle and self._subLabel then self._subLabel.Text = subtitle end
@@ -3529,23 +3719,149 @@ function Private.IsValidImageReference(image)
 		and (image == "" or image:match("^rbxassetid://%d+$") or image:match("^rbxasset://%S+$") or image:match("^https?://%S+$"))
 end
 
+function Private.SampleImageAccent(imageReference)
+    if type(imageReference) == "number" then
+        imageReference = "rbxassetid://" .. tostring(imageReference)
+    elseif type(imageReference) == "string" and imageReference:match("^%d+$") then
+        imageReference = "rbxassetid://" .. imageReference
+    end
+    if type(imageReference) ~= "string" or imageReference == "" then
+        return nil, "No background image is configured"
+    end
+
+    local createOk, editableOrError = pcall(function()
+        return AssetService:CreateEditableImageAsync(Content.fromUri(imageReference))
+    end)
+    if not createOk or not editableOrError then
+        return nil, "EditableImage access may be denied by asset ownership or experience settings: "
+            .. tostring(editableOrError)
+    end
+
+    local editable = editableOrError
+    local readOk, pixelsOrError = pcall(function()
+        local size = editable.Size
+        return editable:ReadPixelsBuffer(Vector2.zero, size), size
+    end)
+    if not readOk then
+        pcall(function() editable:Destroy() end)
+        return nil, "EditableImage pixels could not be read: " .. tostring(pixelsOrError)
+    end
+
+    local pixels, size = pixelsOrError, editable.Size
+    local width = math.max(1, math.floor(size.X))
+    local height = math.max(1, math.floor(size.Y))
+    local readPixelOk, colorOrError = pcall(function()
+        local totalR, totalG, totalB, samples = 0, 0, 0, 0
+        local stepX = math.max(1, math.floor(width / 24))
+        local stepY = math.max(1, math.floor(height / 24))
+        for y = math.floor(height * 0.15), math.floor(height * 0.85), stepY do
+            for x = math.floor(width * 0.15), math.floor(width * 0.85), stepX do
+                local offset = (y * width + x) * 4
+                local r = buffer.readu8(pixels, offset)
+                local g = buffer.readu8(pixels, offset + 1)
+                local b = buffer.readu8(pixels, offset + 2)
+                local a = buffer.readu8(pixels, offset + 3)
+                if a > 48 then
+                    totalR += r
+                    totalG += g
+                    totalB += b
+                    samples += 1
+                end
+            end
+        end
+        if samples == 0 then error("image has no visible sample pixels") end
+        return Color3.fromRGB(
+            math.floor(totalR / samples + 0.5),
+            math.floor(totalG / samples + 0.5),
+            math.floor(totalB / samples + 0.5)
+        )
+    end)
+    pcall(function() editable:Destroy() end)
+    if not readPixelOk then return nil, tostring(colorOrError) end
+    return colorOrError
+end
+
+function Private.ApplyBackgroundAccent(color)
+    if typeof(color) ~= "Color3" then return false, "invalid accent color" end
+    return SilentUI:SetTheme({ Accent = color })
+end
+
+function SilentUI:SetBackgroundAccentFromImage(imageReference)
+    local color, err = Private.SampleImageAccent(imageReference)
+    if not color then return false, err end
+    local ok, setError = Private.ApplyBackgroundAccent(color)
+    if not ok then return false, setError end
+    self.BackgroundImageAccent = color
+    return true, color
+end
+
 function Window:SetBackgroundImage(image)
-	if self._destroyed then return false, "window has been destroyed" end
-	if image == "" then image = nil end
-	if image ~= nil and not Private.IsValidImageReference(image) then
-		return false, "background must be a Roblox asset id or an HTTP(S) image URL"
-	end
-	self._backgroundImage.Image = image or ""
-	return true
+    if self._destroyed then return false, "window has been destroyed" end
+
+    if type(image) == "number" then
+        image = "rbxassetid://" .. tostring(image)
+    elseif type(image) == "string" and image:match("^%d+$") then
+        image = "rbxassetid://" .. image
+    end
+    if image == "" then image = nil end
+    if image ~= nil and not Private.IsValidImageReference(image) then
+        return false, "background must be a Roblox asset ID or an HTTP(S) image URL"
+    end
+
+    local defaults = SilentUI.Defaults.Background or {}
+    local windowTransparency = math.clamp(
+        tonumber(self._backgroundImageTransparency or defaults.ImageTransparency) or 0.22, 0, 1
+    )
+    local launcherTransparency = math.clamp(
+        tonumber(defaults.LauncherTransparency) or 0.18, 0, 1
+    )
+
+    if self._backgroundImage then
+        self._backgroundImage.Image = image or ""
+        self._backgroundImage.ImageTransparency = 1
+        if image then
+            Tween(self._backgroundImage, { ImageTransparency = windowTransparency }, 0.38,
+                Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+        end
+    end
+
+    if self._launcherBackground then
+        self._launcherBackground.Image = image or ""
+        self._launcherBackground.ImageTransparency = 1
+        if image then
+            Tween(self._launcherBackground, { ImageTransparency = launcherTransparency }, 0.38,
+                Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+        end
+    end
+
+    self._backgroundImageReference = image or ""
+    local backgroundDefaults = SilentUI.Defaults.Background or {}
+    if image and backgroundDefaults.UseImageAccent == true then
+        task.defer(function()
+            if not self._destroyed then
+                local accentOk, accent = SilentUI:SetBackgroundAccentFromImage(image)
+                if not accentOk then warn("[SilentUI] background accent extraction skipped: " .. tostring(accent)) end
+            end
+        end)
+    end
+    return true
 end
 
 function Window:SetBackgroundImageTransparency(value)
-	if self._destroyed then return false, "window has been destroyed" end
-	if type(value) ~= "number" or value ~= value or value < 0 or value > 1 then
-		return false, "transparency must be a number between 0 and 1"
-	end
-	self._backgroundImage.ImageTransparency = value
-	return true
+    if self._destroyed then return false, "window has been destroyed" end
+    if type(value) ~= "number" or value ~= value or value < 0 or value > 1 then
+        return false, "transparency must be a number between 0 and 1"
+    end
+    self._backgroundImageTransparency = value
+    local defaults = SilentUI.Defaults.Background or {}
+    local launcherTransparency = math.clamp(tonumber(defaults.LauncherTransparency) or 0.18, 0, 1)
+    if self._backgroundImage then
+        self._backgroundImage.ImageTransparency = value
+    end
+    if self._launcherBackground then
+        self._launcherBackground.ImageTransparency = math.min(1, launcherTransparency + (value - (tonumber(defaults.ImageTransparency) or 0.22)))
+    end
+    return true
 end
 
 function Window:SetInterfaceTransparency(value)
@@ -3607,59 +3923,79 @@ function Window:Close()
 	if self._destroyed or self._busy or self._state ~= "open" then return end
 	self._busy = true
 	self._state = "closed"
- 
 	Private.CloseAnyOpenPopup()
- 
+
 	local gui = self._gui
 	self._sizeBeforeMinimize = self._fullscreen
 		and UDim2.new(0.94, 0, 0.9, 0)
 		or (self._normalSize or gui.Size)
- 
-	Tween(gui, {
-		Size = UDim2.new(gui.Size.X.Scale, gui.Size.X.Offset, 0, 0),
-	}, 0.28, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
+
+	if self._animationScale then
+		self._animationScale.Scale = 1
+		Tween(self._animationScale, { Scale = 0.94 }, 0.26, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
+	end
 	Tween(gui, { BackgroundTransparency = 1 }, 0.24, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
+	if self._backgroundImage then
+		Tween(self._backgroundImage, { ImageTransparency = 1 }, 0.22, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
+	end
 	if self._shadow then
 		Tween(self._shadow, { ImageTransparency = 1 }, 0.24, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
 	end
- 
-	task.delay(0.28, function()
+
+	task.delay(0.27, function()
 		if self._destroyed then return end
 		if self._state == "closed" and gui and gui.Parent then
 			gui.Visible = false
-			if self._launcher then self._launcher.Visible = true end
+			if self._animationScale then self._animationScale.Scale = 1 end
+			if self._launcher then
+				self._launcher.Visible = true
+				if self._launcherAnimationScale then
+					self._launcherAnimationScale.Scale = 0.88
+					Tween(self._launcherAnimationScale, { Scale = 1 }, 0.34,
+						Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+				end
+			end
 		end
 		self._busy = false
 	end)
- 
 end
- 
+
 function Window:Open()
 	if self._destroyed or self._busy or self._state ~= "closed" then return end
 	self._busy = true
 	self._state = "open"
 	if self._launcher then self._launcher.Visible = false end
- 
+
 	local gui = self._gui
 	gui.Visible = true
+	if self._animationScale then
+		self._animationScale.Scale = 0.90
+		Tween(self._animationScale, { Scale = 1 }, 0.34, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+	end
 	if self._shadow then
 		self._shadow.Visible = true
 		self._shadow.ImageTransparency = 1
 		Tween(self._shadow, { ImageTransparency = 0 }, 0.32, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
 	end
- 
+	if self._backgroundImage and self._backgroundImage.Image ~= "" then
+		self._backgroundImage.ImageTransparency = 1
+		Tween(self._backgroundImage, {
+			ImageTransparency = self._backgroundImageTransparency or 0.22,
+		}, 0.38, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+	end
+
 	local targetSize = self._sizeBeforeMinimize or self._normalSize
 	Tween(gui, {
 		Size = targetSize,
 		BackgroundTransparency = self._interfaceTransparency or 0.15,
-	}, 0.32, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
- 
-	task.delay(0.33, function()
+	}, 0.34, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+
+	task.delay(0.35, function()
 		self._busy = false
 		if self._drag then self._drag.Sync() end
 	end)
 end
- 
+
 function Window:ToggleFullscreen()
 	if self._destroyed then return end
 	local gui = self._gui
@@ -3946,491 +4282,278 @@ function Window:AddPanelTab(opts)
 end
  
 function Window:AddBackgroundPanel(opts)
-	opts = opts or {}
-	if self._destroyed then return nil end
+    opts = opts or {}
+    if self._destroyed then return nil end
 
-	local tabObj = self:AddTab({
-		Name = opts.Name or "Background",
-		Icon = opts.Icon or "image",
-		Hidden = opts.Hidden == true,
-	})
+    local tabObj = self:AddTab({
+        Name = opts.Name or "Background",
+        Icon = opts.Icon or "image",
+        Hidden = opts.Hidden == true,
+    })
 
-	tabObj:AddParagraph({
-		Title = opts.Title or "Background",
-		Icon = "image",
-		Text = opts.Description or "Personaliza la imagen de fondo y ajusta su transparencia.",
-	})
+    local configured = SilentUI.Defaults.Background or {}
+    local configuredImage = opts.Image
+    if configuredImage == nil then configuredImage = configured.Image end
+    local imageLabel = type(configuredImage) == "number" and ("rbxassetid://" .. tostring(configuredImage))
+        or tostring(configuredImage or "")
 
-	local presets = {
-		{
-			Name = "Fondo oscuro",
-			URL = "https://raw.githubusercontent.com/OnyxDevv/Onyx-web/refs/heads/main/assets/backgrounds/xero_anime.png",
-			Cache = "dark",
-		},
-		{
-			Name = "Fondo claro",
-			URL = "https://raw.githubusercontent.com/OnyxDevv/Onyx-web/refs/heads/main/assets/backgrounds/xero_anime_white.png",
-			Cache = "light",
-		},
-	}
+    tabObj:AddParagraph({
+        Title = opts.Title or "Background",
+        Icon = "image",
+        Text = opts.Description or (
+            imageLabel ~= ""
+                and "Imagen configurada desde SilentUI.Defaults.Background.Image."
+                or "No hay imagen configurada. Define Background.Image en el bloque de distribución al inicio del archivo."
+        ),
+    })
 
-	local loadGeneration = 0
-	local function applyBackground(url, cacheName, displayName)
-		loadGeneration += 1
-		local generation = loadGeneration
-		task.spawn(function()
-			local asset, loadError = Private.DownloadBackgroundAsset(url, cacheName)
-			if self._destroyed or generation ~= loadGeneration then return end
+    tabObj:AddInfoGrid({
+        Title = "Configuración actual",
+        Description = "Estos valores se controlan desde el bloque de distribución del código.",
+        Columns = 2,
+        Items = {
+            { Label = "Imagen", Value = imageLabel ~= "" and "Configurada" or "Sin imagen" },
+            { Label = "Acento", Value = configured.UseImageAccent and "Desde imagen" or "Tema actual" },
+        },
+    })
 
-			if asset then
-				local ok, setError = self:SetBackgroundImage(asset)
-				SilentUI:Notify({
-					Title = "Background",
-					Text = ok and (displayName .. " aplicado.") or tostring(setError),
-					Type = ok and "success" or "warning",
-					Duration = 6,
-				})
-				return
-			end
+    tabObj:AddSlider({
+        Text = "Transparencia del fondo",
+        Description = "Ajusta la intensidad de la imagen en la ventana y en el botón flotante.",
+        Min = 0,
+        Max = 100,
+        Increment = 1,
+        Default = math.floor(math.clamp(tonumber(self._backgroundImage.ImageTransparency) or 0, 0, 1) * 100 + 0.5),
+        Suffix = "%",
+        Callback = function(value)
+            self:SetBackgroundImageTransparency(math.clamp(value, 0, 100) / 100)
+        end,
+    })
 
-			local directOk, directError = self:SetBackgroundImage(url)
-			SilentUI:Notify({
-				Title = "Background",
-				Text = directOk
-					and (displayName .. " asignado como URL directa.")
-					or tostring(loadError or directError),
-				Type = directOk and "info" or "warning",
-				Duration = 8,
-			})
-		end)
-	end
+    tabObj:AddToggle({
+        Text = "Color de acento desde la imagen",
+        Description = "Intenta extraer un color representativo del fondo. Requiere soporte EditableImage y permisos del asset.",
+        Default = configured.UseImageAccent == true,
+        Callback = function(enabled)
+            configured.UseImageAccent = enabled == true
+            if enabled then
+                local ok, err = SilentUI:SetBackgroundAccentFromImage(imageLabel)
+                SilentUI:Notify({
+                    Title = "Background",
+                    Text = ok and "Color de acento actualizado desde la imagen." or tostring(err),
+                    Type = ok and "success" or "warning",
+                    Duration = 7,
+                })
+            end
+        end,
+    })
 
-	for _, preset in ipairs(presets) do
-		local presetData = preset
-		tabObj:AddButton({
-			Text = presetData.Name,
-			Description = "Aplicar el fondo predeterminado " .. string.lower(presetData.Name) .. ".",
-			Icon = "image",
-			Callback = function()
-				applyBackground(presetData.URL, presetData.Cache, presetData.Name)
-			end,
-		})
-	end
+    tabObj:AddButton({
+        Text = "Restaurar fondo configurado",
+        Description = "Vuelve a aplicar la imagen definida en SilentUI.Defaults.Background.Image.",
+        Icon = "image",
+        Callback = function()
+            local ok, err = self:SetBackgroundImage(imageLabel)
+            SilentUI:Notify({
+                Title = "Background",
+                Text = ok and "Fondo restaurado." or tostring(err),
+                Type = ok and "success" or "warning",
+                Duration = 5,
+            })
+        end,
+    })
 
-	local imageInput = tabObj:AddTextbox({
-		Text = "Imagen personalizada",
-		Description = "Acepta rbxassetid:// o una URL HTTPS directa.",
-		Placeholder = "rbxassetid://123456789 o https://...",
-		Default = opts.DefaultImage or "",
-	})
-	tabObj:AddButton({
-		Text = "Aplicar imagen personalizada",
-		Description = "Usar la imagen indicada arriba.",
-		Icon = "image-plus",
-		Callback = function()
-			local image = imageInput and imageInput.Get and imageInput:Get() or ""
-			if image == "" then
-				SilentUI:Notify({
-					Title = "Background",
-					Text = "Introduce un ID de imagen o una URL antes de aplicarla.",
-					Type = "warning",
-					Duration = 5,
-				})
-				return
-			end
+    tabObj:AddButton({
+        Text = "Quitar fondo",
+        Description = "Oculta la imagen en la ventana y el botón flotante.",
+        Icon = "image-off",
+        Callback = function()
+            local ok, err = self:SetBackgroundImage("")
+            SilentUI:Notify({
+                Title = "Background",
+                Text = ok and "Fondo eliminado." or tostring(err),
+                Type = ok and "success" or "warning",
+                Duration = 5,
+            })
+        end,
+    })
 
-			if image:match("^https?://") then
-				local hash = 7
-				for index = 1, #image do
-					hash = (hash * 31 + image:byte(index)) % 2147483647
-				end
-				applyBackground(image, "custom-" .. tostring(hash), "Imagen personalizada")
-			else
-				local ok, err = self:SetBackgroundImage(image)
-				SilentUI:Notify({
-					Title = "Background",
-					Text = ok and "Imagen personalizada aplicada." or tostring(err),
-					Type = ok and "success" or "warning",
-					Duration = 6,
-				})
-			end
-		end,
-	})
-
-	tabObj:AddSlider({
-		Text = "Transparencia de la imagen",
-		Description = "0% muestra la imagen completa; 100% la oculta.",
-		Min = 0,
-		Max = 100,
-		Increment = 1,
-		Default = math.floor(math.clamp(tonumber(self._backgroundImage.ImageTransparency) or 0, 0, 1) * 100 + 0.5),
-		Suffix = "%",
-		Callback = function(value)
-			self:SetBackgroundImageTransparency(math.clamp(value, 0, 100) / 100)
-		end,
-	})
-
-	tabObj:AddButton({
-		Text = "Quitar fondo",
-		Description = "Volver al fondo base de SilentUI.",
-		Icon = "image-off",
-		Callback = function()
-			loadGeneration += 1
-			local ok, err = self:SetBackgroundImage("")
-			SilentUI:Notify({
-				Title = "Background",
-				Text = ok and "Fondo eliminado." or tostring(err),
-				Type = ok and "success" or "warning",
-				Duration = 5,
-			})
-		end,
-	})
-
-	return {
-		Instance = tabObj._group,
-		Tab = tabObj,
-		Destroy = function() tabObj._group:Destroy() end,
-	}
+    return {
+        Instance = tabObj._group,
+        Tab = tabObj,
+        Destroy = function() tabObj._group:Destroy() end,
+    }
 end
 
 function Private.OpenExternalURL(url)
-	if type(url) ~= "string" or not url:match("^https://") then
-		return false, "invalid external URL"
-	end
+    if type(url) ~= "string" or not url:match("^https://") then
+        return false, "invalid external URL"
+    end
 
-	local globals = Private.GetGlobalTable()
-	local candidates = {}
-	local function addCandidate(value)
-		if type(value) == "function" then
-			for _, existing in ipairs(candidates) do
-				if existing == value then return end
-			end
-			table.insert(candidates, value)
-		end
-	end
+    local globals = Private.GetGlobalTable()
+    local candidates = {}
+    local seen = {}
+    local function addCandidate(fn, owner)
+        if type(fn) ~= "function" or seen[fn] then return end
+        seen[fn] = true
+        table.insert(candidates, { Function = fn, Owner = owner })
+    end
 
-	addCandidate(globals.openurl)
-	addCandidate(globals.open_url)
-	addCandidate(globals.OpenURL)
-	addCandidate(globals.OpenUrl)
-	addCandidate(globals.openExternalURL)
-	addCandidate(hasFn("openurl"))
-	addCandidate(hasFn("open_url"))
-	addCandidate(hasFn("OpenURL"))
-	addCandidate(hasFn("OpenUrl"))
-	addCandidate(hasFn("openExternalURL"))
+    local aliases = {
+        "openurl", "open_url", "openUrl", "OpenURL", "OpenUrl", "openURL",
+        "openlink", "open_link", "openLink", "OpenLink",
+        "openexternalurl", "open_external_url", "openExternalURL", "openExternalUrl", "OpenExternalURL",
+        "openbrowser", "open_browser", "openBrowser", "OpenBrowser",
+        "openexternal", "open_external", "openExternal", "OpenExternal",
+        "openwebsite", "open_website", "openWebsite", "OpenWebsite",
+        "launchurl", "launch_url", "launchURL", "LaunchURL",
+        "visiturl", "visit_url", "visitURL", "VisitURL",
+        "browse", "Browse", "openInBrowser", "open_in_browser",
+        "openURLAsync", "OpenURLAsync", "urlopen", "url_open",
+    }
 
-	local synTable = type(globals.syn) == "table" and globals.syn or nil
-	local httpTable = type(globals.http) == "table" and globals.http or nil
-	if synTable then
-		addCandidate(synTable.openurl)
-		addCandidate(synTable.open_url)
-	end
-	if httpTable then
-		addCandidate(httpTable.openurl)
-		addCandidate(httpTable.open_url)
-	end
+    for _, name in ipairs(aliases) do
+        addCandidate(globals[name])
+        addCandidate(hasFn(name))
+    end
 
-	for _, openFunction in ipairs(candidates) do
-		local ok, result = pcall(openFunction, url)
-		if ok and result ~= false then
-			return true
-		end
-	end
-	return false, "this executor does not expose an external URL opener"
+    local namespaces = {
+        globals.syn, globals.http, globals.fluxus, globals.Fluxus,
+        globals.xeno, globals.Xeno, globals.delta, globals.Delta,
+        globals.krnl, globals.KRNL, globals.electron, globals.Electron,
+        globals.synapse, globals.Synapse, globals.executor, globals.Executor,
+        globals.browser, globals.Browser, globals.linking, globals.Linking,
+    }
+    for _, namespace in ipairs(namespaces) do
+        if type(namespace) == "table" then
+            for _, name in ipairs(aliases) do
+                addCandidate(namespace[name], namespace)
+            end
+        end
+    end
+
+    -- Some executors expose a proxy for Roblox's LinkingService:OpenUrl.
+    local okService, linkingService = pcall(function()
+        return game:GetService("LinkingService")
+    end)
+    if okService and linkingService then
+        addCandidate(linkingService.OpenUrl, linkingService)
+        addCandidate(linkingService.openUrl, linkingService)
+    end
+
+    for _, candidate in ipairs(candidates) do
+        local ok, result
+        if candidate.Owner then
+            ok, result = pcall(candidate.Function, candidate.Owner, url)
+            if not ok or result == false then
+                ok, result = pcall(candidate.Function, url)
+            end
+        else
+            ok, result = pcall(candidate.Function, url)
+        end
+        if ok and result ~= false then return true end
+    end
+
+    return false, "this executor does not expose a compatible external URL opener"
+end
+
+function Private.CopyToClipboard(text)
+    if type(text) ~= "string" then return false end
+    local globals = Private.GetGlobalTable()
+    local aliases = { "setclipboard", "set_clipboard", "toclipboard", "to_clipboard", "writeclipboard", "write_clipboard" }
+    for _, name in ipairs(aliases) do
+        local fn = globals[name] or hasFn(name)
+        if type(fn) == "function" then
+            local ok, result = pcall(fn, text)
+            if ok and result ~= false then return true end
+        end
+    end
+    for _, namespaceName in ipairs({ "syn", "fluxus", "xeno", "delta", "krnl", "executor" }) do
+        local namespace = globals[namespaceName]
+        if type(namespace) == "table" then
+            for _, name in ipairs(aliases) do
+                local fn = namespace[name]
+                if type(fn) == "function" then
+                    local ok, result = pcall(fn, namespace, text)
+                    if not ok or result == false then ok, result = pcall(fn, text) end
+                    if ok and result ~= false then return true end
+                end
+            end
+        end
+    end
+    return false
 end
 
 function Window:AddDiscordPanel(opts)
-	opts = opts or {}
+    opts = opts or {}
 
-	local tabObj = self:AddTab({
-		Name = opts.Name or "Discord",
-		Icon = opts.Icon or "messages-square",
-		Hidden = opts.Hidden == true,
-	})
+    local tabObj = self:AddTab({
+        Name = opts.Name or "Discord",
+        Icon = opts.Icon or "messages-square",
+        Hidden = opts.Hidden == true,
+    })
 
-	tabObj:AddParagraph({
-		Title = opts.Title or "Discord",
-		Icon = "messages-square",
-		Text = opts.Description or "Abre una de las invitaciones de la comunidad desde tu executor.",
-	})
+    local discordDefaults = SilentUI.Defaults.Discord or {}
+    local invite = tostring(opts.Invite or discordDefaults.Invite or "")
+    local replacement = tostring(opts.Replacement or discordDefaults.Replacement or "")
+    if invite == "" then invite = SilentUI.DefaultDiscordInvite end
+    if replacement == "" then replacement = SilentUI.DefaultDiscordReplacement end
 
-	local function openInvite(title, invite)
-		local opened = Private.OpenExternalURL(invite)
-		if opened then
-			SilentUI:Notify({
-				Title = "Discord",
-				Text = title .. " abierta en el navegador.",
-				Type = "success",
-				Duration = 5,
-			})
-			return
-		end
+    tabObj:AddParagraph({
+        Title = opts.Title or "Discord",
+        Icon = "messages-square",
+        Text = opts.Description or "Abre las invitaciones configuradas para la comunidad.",
+    })
 
-		local clipboard = hasFn("setclipboard")
-		if clipboard then
-			local copied = pcall(clipboard, invite)
-			SilentUI:Notify({
-				Title = title,
-				Text = copied
-					and "Se copió al portapapeles."
-					or invite,
-				Type = copied and "info" or "warning",
-				Duration = 8,
-			})
-		else
-			SilentUI:Notify({
-				Title = title,
-				Text = "Copia la invitación: " .. invite,
-				Type = "info",
-				Duration = 10,
-			})
-		end
-	end
+    local function addInviteButton(title, description, url)
+        return tabObj:AddButton({
+            Text = title,
+            Description = description,
+            Icon = "external-link",
+            Callback = function()
+                local opened = Private.OpenExternalURL(url)
+                if opened then
+                    SilentUI:Notify({
+                        Title = "Discord",
+                        Text = title .. " abierta en el navegador.",
+                        Type = "success",
+                        Duration = 5,
+                    })
+                    return
+                end
 
-	local function addInviteButton(title, description, invite)
-		return tabObj:AddButton({
-			Text = title,
-			Description = description or invite,
-			Icon = "external-link",
-			Callback = function()
-				openInvite(title, invite)
-			end,
-		})
-	end
+                local copied = Private.CopyToClipboard(url)
+                SilentUI:Notify({
+                    Title = "Discord",
+                    Text = copied
+                        and "Este executor no pudo abrir el enlace; se copió al portapapeles."
+                        or ("No hay abridor externo ni portapapeles compatible. Enlace: " .. url),
+                    Type = copied and "info" or "warning",
+                    Duration = 9,
+                })
+            end,
+        })
+    end
 
-	local firstInvite = addInviteButton(
-		"Invitacion:",
-		"Abrir la invitación principal de Discord.",
-		"https://discord.gg/k3SVsV7sXs"
-	)
-	local secondInvite = addInviteButton(
-		"Repuesto:",
-		"Abrir la invitación alternativa de Discord.",
-		"https://discord.gg/HnGeFAXmdH"
-	)
+    local firstInvite = addInviteButton(
+        "Invitacion:",
+        "Abrir la invitación principal de Discord.",
+        invite
+    )
+    local secondInvite = addInviteButton(
+        "Repuesto:",
+        "Abrir la invitación de reemplazo.",
+        replacement
+    )
 
-	return {
-		Instance = tabObj._group,
-		Tab = tabObj,
-		Invites = { firstInvite, secondInvite },
-		Destroy = function() tabObj._group:Destroy() end,
-	}
+    return {
+        Instance = tabObj._group,
+        Tab = tabObj,
+        Invites = { firstInvite, secondInvite },
+        Destroy = function() tabObj._group:Destroy() end,
+    }
 end
 
-function Window:AddDefaultCreditsPanel()
-	local jan = self._janitor
-	local dockBtn
-	local panel = self:AddPanelTab({
-		Name = "Credits",
-		Icon = "Lucide:heart-handshake",
-		OnToggle = function(isOpen)
-			if dockBtn then dockBtn:SetActive(isOpen) end
-		end,
-	})
- 
-	local CREDITS = {
-		{ Name = "SilentUI", Role = "UI library and reusable component system", Color = Color3.fromRGB(120, 150, 255) },
-	}
- 
-	local HEADER_H = 38
- 
-	local header = Instance.new("Frame")
-	header.BackgroundTransparency = 1
-	header.Size = UDim2.new(1, 0, 0, HEADER_H)
-	header.ZIndex = Z.Content + 1
-	header.Parent = panel.Instance
- 
-	local headerPad = Instance.new("UIPadding")
-	headerPad.PaddingLeft = UDim.new(0, 14)
-	headerPad.PaddingRight = UDim.new(0, 8)
-	headerPad.Parent = header
- 
-	local titleRow = Instance.new("Frame")
-	titleRow.BackgroundTransparency = 1
-	titleRow.Size = UDim2.new(1, -40, 1, 0)
-	titleRow.ZIndex = Z.Content + 2
-	titleRow.Parent = header
- 
-	local titleLayout = Instance.new("UIListLayout")
-	titleLayout.FillDirection = Enum.FillDirection.Horizontal
-	titleLayout.VerticalAlignment = Enum.VerticalAlignment.Center
-	titleLayout.Padding = UDim.new(0, 7)
-	titleLayout.Parent = titleRow
- 
-	local titleIcon = Instance.new("ImageLabel")
-	titleIcon.BackgroundTransparency = 1
-	titleIcon.Image = ResolveIcon("heart-handshake")
-	titleIcon.ImageColor3 = SilentUI.Theme.Text
-	titleIcon.Size = UDim2.fromOffset(14, 14)
-	titleIcon.LayoutOrder = 1
-	titleIcon.ZIndex = Z.Content + 3
-	titleIcon.Parent = titleRow
- 
-	local titleLabel = Instance.new("TextLabel")
-	titleLabel.BackgroundTransparency = 1
-	titleLabel.FontFace = SilentUI.Theme.Font
-	titleLabel.Text = "Credits"
-	titleLabel.TextColor3 = SilentUI.Theme.Text
-	titleLabel.TextSize = 14
-	titleLabel.TextXAlignment = Enum.TextXAlignment.Left
-	titleLabel.AutomaticSize = Enum.AutomaticSize.X
-	titleLabel.Size = UDim2.fromOffset(0, 14)
-	titleLabel.LayoutOrder = 2
-	titleLabel.ZIndex = Z.Content + 3
-	titleLabel.Parent = titleRow
- 
-	local closeBtn = Instance.new("TextButton")
-	closeBtn.Text = ""
-	closeBtn.AutoButtonColor = false
-	closeBtn.BackgroundColor3 = SilentUI.Theme.Surface
-	closeBtn.BackgroundTransparency = 1
-	closeBtn.BorderSizePixel = 0
-	closeBtn.AnchorPoint = Vector2.new(1, 0.5)
-	closeBtn.Position = UDim2.new(1, 0, 0.5, 0)
-	closeBtn.Size = UDim2.fromOffset(26, 26)
-	closeBtn.ZIndex = Z.Content + 2
-	closeBtn.Parent = header
- 
-	local closeIcon = Instance.new("ImageLabel")
-	closeIcon.BackgroundTransparency = 1
-	closeIcon.Image = ResolveIcon("x")
-	closeIcon.ImageColor3 = SilentUI.Theme.TextDim
-	closeIcon.Size = UDim2.fromOffset(13, 13)
-	closeIcon.AnchorPoint = Vector2.new(0.5, 0.5)
-	closeIcon.Position = UDim2.fromScale(0.5, 0.5)
-	closeIcon.ZIndex = Z.Content + 3
-	closeIcon.Parent = closeBtn
- 
-	closeBtn.MouseEnter:Connect(function() closeIcon.ImageColor3 = SilentUI.Theme.Text end)
-	closeBtn.MouseLeave:Connect(function() closeIcon.ImageColor3 = SilentUI.Theme.TextDim end)
-	closeBtn.MouseButton1Click:Connect(function() panel.Close() end)
- 
-	local divider = Instance.new("Frame")
-	divider.BackgroundColor3 = SilentUI.Theme.Surface
-	divider.BackgroundTransparency = 0.94
-	divider.BorderSizePixel = 0
-	divider.Position = UDim2.fromOffset(0, HEADER_H)
-	divider.Size = UDim2.new(1, 0, 0, 1)
-	divider.ZIndex = Z.Content + 1
-	divider.Parent = panel.Instance
- 
-	local scroll = Instance.new("ScrollingFrame")
-	scroll.BackgroundTransparency = 1
-	scroll.BorderSizePixel = 0
-	scroll.Position = UDim2.fromOffset(0, HEADER_H + 1)
-	scroll.Size = UDim2.new(1, 0, 1, -(HEADER_H + 1))
-	scroll.ScrollingDirection = Enum.ScrollingDirection.Y
-	scroll.ScrollBarThickness = 0
-	scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-	scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-	scroll.ZIndex = Z.Content + 1
-	scroll.Parent = panel.Instance
- 
-	local scrollPad = Instance.new("UIPadding")
-	scrollPad.PaddingTop = UDim.new(0, 12)
-	scrollPad.PaddingBottom = UDim.new(0, 12)
-	scrollPad.PaddingLeft = UDim.new(0, 14)
-	scrollPad.PaddingRight = UDim.new(0, 14)
-	scrollPad.Parent = scroll
- 
-	local listLayout = Instance.new("UIListLayout")
-	listLayout.Padding = UDim.new(0, 8)
-	listLayout.SortOrder = Enum.SortOrder.LayoutOrder
-	listLayout.Parent = scroll
- 
-	AddScrollbar(scroll)
-	Private.AddContentScrollThumb(scroll, listLayout, panel.Instance, jan)
- 
-	for i, credit in ipairs(CREDITS) do
-		local row = Instance.new("Frame")
-		row.Name = credit.Name
-		row.BackgroundColor3 = SilentUI.Theme.Surface
-		row.BackgroundTransparency = 0.96
-		row.BorderSizePixel = 0
-		row.LayoutOrder = i
-		row.Size = UDim2.new(1, 0, 0, 60)
-		row.ZIndex = Z.Content + 2
-		row.Parent = scroll
- 
-		local rowCorner = Instance.new("UICorner")
-		rowCorner.CornerRadius = UDim.new(0, 10)
-		rowCorner.Parent = row
- 
-		local rowStroke = Instance.new("UIStroke")
-		rowStroke.Color = SilentUI.Theme.Border
-		rowStroke.Transparency = 0.94
-		rowStroke.Thickness = 1
-		rowStroke.Parent = row
- 
-		row.MouseEnter:Connect(function() row.BackgroundTransparency = 0.92 end)
-		row.MouseLeave:Connect(function() row.BackgroundTransparency = 0.96 end)
- 
-		local avatar = Instance.new("Frame")
-		avatar.AnchorPoint = Vector2.new(0, 0.5)
-		avatar.Position = UDim2.new(0, 12, 0.5, 0)
-		avatar.Size = UDim2.fromOffset(38, 38)
-		avatar.BackgroundColor3 = credit.Color
-		avatar.BackgroundTransparency = 0.82
-		avatar.BorderSizePixel = 0
-		avatar.ZIndex = Z.Content + 2
-		avatar.Parent = row
- 
-		local avCorner = Instance.new("UICorner")
-		avCorner.CornerRadius = UDim.new(1, 0)
-		avCorner.Parent = avatar
- 
-		local avStroke = Instance.new("UIStroke")
-		avStroke.Color = credit.Color
-		avStroke.Transparency = 0.55
-		avStroke.Thickness = 1
-		avStroke.Parent = avatar
- 
-		local avIcon = Instance.new("ImageLabel")
-		avIcon.BackgroundTransparency = 1
-		avIcon.Image = ResolveIcon("user-round")
-		avIcon.ImageColor3 = credit.Color
-		avIcon.Size = UDim2.fromOffset(17, 17)
-		avIcon.AnchorPoint = Vector2.new(0.5, 0.5)
-		avIcon.Position = UDim2.fromScale(0.5, 0.5)
-		avIcon.ZIndex = Z.Content + 3
-		avIcon.Parent = avatar
- 
-		local nameLabel = Instance.new("TextLabel")
-		nameLabel.BackgroundTransparency = 1
-		nameLabel.FontFace = SilentUI.Theme.Font
-		nameLabel.Text = credit.Name
-		nameLabel.TextColor3 = SilentUI.Theme.Text
-		nameLabel.TextSize = 13.5
-		nameLabel.TextXAlignment = Enum.TextXAlignment.Left
-		nameLabel.Position = UDim2.fromOffset(62, 8)
-		nameLabel.Size = UDim2.new(1, -74, 0, 16)
-		nameLabel.ZIndex = Z.Content + 2
-		nameLabel.Parent = row
- 
-		local roleLabel = Instance.new("TextLabel")
-		roleLabel.BackgroundTransparency = 1
-		roleLabel.FontFace = SilentUI.Theme.FontRegular
-		roleLabel.Text = credit.Role
-		roleLabel.TextColor3 = SilentUI.Theme.TextDim
-		roleLabel.TextSize = 11.5
-		roleLabel.TextWrapped = true
-		roleLabel.TextXAlignment = Enum.TextXAlignment.Left
-		roleLabel.TextYAlignment = Enum.TextYAlignment.Top
-		roleLabel.Position = UDim2.fromOffset(62, 25)
-		roleLabel.Size = UDim2.new(1, -74, 0, 28)
-		roleLabel.ZIndex = Z.Content + 2
-		roleLabel.Parent = row
-	end
- 
-	dockBtn = self:AddDockButton({
-		Icon = "Lucide:heart-handshake",
-		Callback = function() panel.Toggle() end,
-	})
- 
-	return panel
-end
- 
 function Window:AddSpotifyPanel(opts)
 	opts = opts or {}
 	local jan = self._janitor
@@ -5602,1047 +5725,6 @@ function Window:AddSpotifyPanel(opts)
 		setStatus("Tap Connect, then open the copied browser link", SilentUI.Theme.TextDim)
 	end
 	return panel
-end
- 
-function Window:_BuildDefaultChatTools()
-	local windowSelf = self
- 
-	return {
-		{
-			Name = "list_ui_elements",
-			Description = "Lists every UI element that has a Flag, with its kind and current value.",
-			Parameters = { type = "object", properties = {}, required = {} },
-			Handler = function()
-				return SilentUI:ListUIElements()
-			end,
-		},
-		{
-			Name = "set_ui_element_value",
-			Description = "Sets a UI element's value by its flag name. Use list_ui_elements first to find valid flags.",
-			Parameters = {
-				type = "object",
-				properties = {
-					flag  = { type = "string", description = "The Flag of the UI element to change." },
-					value = { description = "The new value: true/false for a Toggle, a number for a Slider, a string for a Textbox/Dropdown." },
-				},
-				required = { "flag", "value" },
-			},
-			Handler = function(args)
-				local ok, err = SilentUI:SetUIElementValue(args.flag, args.value)
-				if not ok then error(err, 0) end
-				return true
-			end,
-		},
-		{
-			Name = "select_tab",
-			Description = "Switches the panel to one of its top-level sidebar tabs.",
-			Parameters = {
-				type = "object",
-				properties = {
-					tab = { type = "string", description = "The tab's name." },
-				},
-				required = { "tab" },
-			},
-			Handler = function(args)
-				local tabObj = windowSelf:SelectTab(args.tab)
-				if not tabObj then error("No tab named '" .. tostring(args.tab) .. "'", 0) end
-				return "Switched to " .. tabObj.Name
-			end,
-		},
-		{
-			Name = "select_subtab",
-			Description = "Switches to a sub-tab nested under one of the top-level tabs. Selects the "
-				.. "parent tab first automatically -- no need to call select_tab beforehand.",
-			Parameters = {
-				type = "object",
-				properties = {
-					tab    = { type = "string", description = "The top-level tab that contains the sub-tab." },
-					subtab = { type = "string", description = "The sub-tab's name." },
-				},
-				required = { "tab", "subtab" },
-			},
-			Handler = function(args)
-				local tabObj = windowSelf:SelectTab(args.tab)
-				if not tabObj then error("No tab named '" .. tostring(args.tab) .. "'", 0) end
-				local sub = tabObj:SelectSubTabByName(args.subtab)
-				if not sub then
-					error("No sub-tab named '" .. tostring(args.subtab) .. "' under " .. tabObj.Name, 0)
-				end
-				return "Switched to " .. tabObj.Name .. " > " .. sub.Name
-			end,
-		},
-		{
-			Name = "find_and_highlight_element",
-			Description = "Finds a UI element (button, toggle, card, slider, etc.) by its visible label, "
-				.. "jumps to whichever tab or sub-tab it lives on, scrolls to it, and flashes a highlight "
-				.. "on it -- the same thing Ctrl+K search does when you click a result.",
-			Parameters = {
-				type = "object",
-				properties = {
-					query = { type = "string", description = "The element's visible text. Partial matches are fine." },
-				},
-				required = { "query" },
-			},
-			Handler = function(args)
-				local ok, titleOrErr = windowSelf:JumpToElement(args.query)
-				if not ok then error(titleOrErr, 0) end
-				return "Highlighted: " .. titleOrErr
-			end,
-		},
-	}
-end
- 
-function Window:_BuildDefaultSystemPrompt()
-	local names = {}
-	for _, t in ipairs(self._tabs) do
-		if not t.Hidden then table.insert(names, t.Name) end
-	end
- 
-	return "You are a helpful assistant embedded in a Roblox UI panel built with SilentUI. Your tools "
-		.. "only affect THIS PANEL -- they inspect/adjust the panel's own toggles/sliders/etc, switch "
-		.. "between its top-level tabs (" .. table.concat(names, ", ") .. "), switch to a specific "
-		.. "sub-tab within one of those, and jump to/highlight a specific UI element on the panel by "
-		.. "its visible label. Only use select_tab, select_subtab, or find_and_highlight_element when "
-		.. "the user is asking to be taken somewhere IN THIS PANEL, or to interact with a control "
-		.. "that's actually on it. If the user asks you to write a script, explain something, or "
-		.. "anything else that isn't about navigating this panel, just answer directly in chat -- do "
-		.. "not call a tool just because the message happens to mention a word that sounds like a "
-		.. "setting. When you write a Luau script for the user, put it in a normal ```lua fenced block "
-		.. "-- the panel automatically adds a Run button to it that the user can click themselves, so "
-		.. "you don't need to explain how to run it or tell them you can't execute code; you're just "
-		.. "not the one who decides to run it -- they click Run after reading it. Keep answers short "
-		.. "and to the point. None of your tools execute anything outside this panel, and you have no "
-		.. "way to trigger the Run button yourself."
-end
- 
-function Window:AddChatPanel(opts)
-	opts = opts or {}
-	opts.Tools = opts.Tools or self:_BuildDefaultChatTools()
-	local jan = self._janitor
- 
-	local tabObj = self:AddTab({
-		Name   = opts.Name or "Assistant",
-		Icon   = opts.Icon or "bot",
-		Hidden = true,
-	})
-	tabObj._page.Visible = false
- 
-	local staleEmptyState = tabObj._group:FindFirstChild("EmptyState")
-	if staleEmptyState then staleEmptyState.Visible = false end
- 
-	local toolByName = {}
-	for _, tool in ipairs(opts.Tools or {}) do
-		if tool.Name then toolByName[tool.Name] = tool end
-	end
- 
-	local INPUT_H = 38
-	local HEADER_H = 38
- 
-	local panel = Instance.new("Frame")
-	panel.Name = "ChatPanel"
-	panel.BackgroundTransparency = 1
-	panel.ClipsDescendants = true
-	panel.Size = UDim2.fromScale(1, 1)
-	panel.ZIndex = Z.Content
-	panel.Parent = tabObj._group
- 
-	local BASE_Z = panel.ZIndex + 1
- 
-	local content = Instance.new("Frame")
-	content.Name = "Content"
-	content.BackgroundTransparency = 1
-	content.Size = UDim2.fromScale(1, 1)
-	content.ZIndex = panel.ZIndex
-	content.Parent = panel
- 
-	local header = Instance.new("Frame")
-	header.BackgroundTransparency = 1
-	header.Active = true
-	header.Size = UDim2.new(1, 0, 0, HEADER_H)
-	header.ZIndex = BASE_Z
-	header.Parent = content
- 
-	local headerPad = Instance.new("UIPadding")
-	headerPad.PaddingLeft = UDim.new(0, 14)
-	headerPad.PaddingRight = UDim.new(0, 8)
-	headerPad.Parent = header
- 
-	local titleRow = Instance.new("Frame")
-	titleRow.BackgroundTransparency = 1
-	titleRow.Size = UDim2.new(1, -84, 1, 0)
-	titleRow.ZIndex = BASE_Z + 1
-	titleRow.Parent = header
- 
-	local titleLayout = Instance.new("UIListLayout")
-	titleLayout.FillDirection = Enum.FillDirection.Horizontal
-	titleLayout.VerticalAlignment = Enum.VerticalAlignment.Center
-	titleLayout.Padding = UDim.new(0, 7)
-	titleLayout.Parent = titleRow
- 
-	local titleIcon = Instance.new("ImageLabel")
-	titleIcon.BackgroundTransparency = 1
-	titleIcon.Image = ResolveIcon(opts.Icon or "bot")
-	titleIcon.ImageColor3 = SilentUI.Theme.Text
-	titleIcon.Size = UDim2.fromOffset(14, 14)
-	titleIcon.LayoutOrder = 1
-	titleIcon.ZIndex = BASE_Z + 2
-	titleIcon.Parent = titleRow
- 
-	local titleLabel = Instance.new("TextLabel")
-	titleLabel.BackgroundTransparency = 1
-	titleLabel.FontFace = SilentUI.Theme.Font
-	titleLabel.Text = opts.Title or "Assistant"
-	titleLabel.TextColor3 = SilentUI.Theme.Text
-	titleLabel.TextSize = 14
-	titleLabel.TextXAlignment = Enum.TextXAlignment.Left
-	titleLabel.AutomaticSize = Enum.AutomaticSize.X
-	titleLabel.Size = UDim2.fromOffset(0, 16)
-	titleLabel.LayoutOrder = 2
-	titleLabel.ZIndex = BASE_Z + 2
-	titleLabel.Parent = titleRow
- 
-	local controls = Instance.new("Frame")
-	controls.BackgroundTransparency = 1
-	controls.AnchorPoint = Vector2.new(1, 0.5)
-	controls.Position = UDim2.new(1, 0, 0.5, 0)
-	controls.Size = UDim2.fromOffset(100, 22)
-	controls.ZIndex = BASE_Z + 1
-	controls.Parent = header
- 
-	local controlsLayout = Instance.new("UIListLayout")
-	controlsLayout.FillDirection = Enum.FillDirection.Horizontal
-	controlsLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
-	controlsLayout.VerticalAlignment = Enum.VerticalAlignment.Center
-	controlsLayout.Padding = UDim.new(0, 4)
-	controlsLayout.Parent = controls
- 
-	local function headerIconButton(icon, layoutOrder)
-		local btn = Instance.new("TextButton")
-		btn.Text = ""
-		btn.AutoButtonColor = false
-		btn.BackgroundColor3 = SilentUI.Theme.Surface
-		btn.BackgroundTransparency = 1
-		btn.BorderSizePixel = 0
-		btn.Size = UDim2.fromOffset(22, 22)
-		btn.LayoutOrder = layoutOrder
-		btn.ZIndex = BASE_Z + 1
-		btn.Parent = controls
-		Corner(btn, 6)
- 
-		local ic = Instance.new("ImageLabel")
-		ic.BackgroundTransparency = 1
-		ic.Image = ResolveIcon(icon)
-		ic.ImageColor3 = SilentUI.Theme.TextDim
-		ic.Size = UDim2.fromOffset(13, 13)
-		ic.AnchorPoint = Vector2.new(0.5, 0.5)
-		ic.Position = UDim2.fromScale(0.5, 0.5)
-		ic.ZIndex = BASE_Z + 2
-		ic.Parent = btn
- 
-		jan:Add(btn.MouseEnter:Connect(function()
-			Tween(btn, { BackgroundTransparency = 0.9 }, 0.12)
-			Tween(ic, { ImageColor3 = SilentUI.Theme.Text }, 0.12)
-		end))
-		jan:Add(btn.MouseLeave:Connect(function()
-			Tween(btn, { BackgroundTransparency = 1 }, 0.12)
-			Tween(ic, { ImageColor3 = SilentUI.Theme.TextDim }, 0.12)
-		end))
- 
-		return btn, ic
-	end
- 
-	local copyBtn, copyIcon = headerIconButton("copy", 1)
-	local regenBtn, regenIcon = headerIconButton("refresh-cw", 2)
-	local clearBtn = headerIconButton("trash-2", 3)
-	local closeBtn = headerIconButton("x", 4)
- 
-	local headerDivider = Instance.new("Frame")
-	headerDivider.BackgroundColor3 = SilentUI.Theme.Surface
-	headerDivider.BackgroundTransparency = 0.94
-	headerDivider.BorderSizePixel = 0
-	headerDivider.Position = UDim2.fromOffset(0, HEADER_H)
-	headerDivider.Size = UDim2.new(1, 0, 0, 1)
-	headerDivider.ZIndex = BASE_Z
-	headerDivider.Parent = content
- 
-	local contentPad = Instance.new("UIPadding")
-	contentPad.PaddingLeft = UDim.new(0, 14)
-	contentPad.PaddingRight = UDim.new(0, 14)
-	contentPad.PaddingBottom = UDim.new(0, 12)
-	contentPad.Parent = content
- 
-	local inputRow = Instance.new("Frame")
-	inputRow.BackgroundTransparency = 1
-	inputRow.Active = true
-	inputRow.AnchorPoint = Vector2.new(0, 1)
-	inputRow.Position = UDim2.new(0, 0, 1, 0)
-	inputRow.Size = UDim2.new(1, 0, 0, INPUT_H)
-	inputRow.ZIndex = BASE_Z
-	inputRow.Parent = content
- 
-	local pill = Instance.new("Frame")
-	pill.BackgroundColor3 = SilentUI.Theme.Surface
-	pill.BackgroundTransparency = 0.95
-	pill.BorderSizePixel = 0
-	pill.Size = UDim2.new(1, -(INPUT_H + 6), 1, 0)
-	pill.ZIndex = BASE_Z + 1
-	pill.Parent = inputRow
-	Corner(pill, 9)
-	local pillStroke = Stroke(pill, SilentUI.Theme.Border, 1, 0.9)
- 
-	local pillPad = Instance.new("UIPadding")
-	pillPad.PaddingLeft = UDim.new(0, 10)
-	pillPad.PaddingRight = UDim.new(0, 10)
-	pillPad.Parent = pill
- 
-	local inputBox = Instance.new("TextBox")
-	inputBox.BackgroundTransparency = 1
-	inputBox.ClearTextOnFocus = false
-	inputBox.FontFace = SilentUI.Theme.FontRegular
-	inputBox.PlaceholderText = opts.Placeholder or "Ask me anything..."
-	inputBox.PlaceholderColor3 = SilentUI.Theme.TextDim
-	inputBox.Text = ""
-	inputBox.TextColor3 = SilentUI.Theme.Text
-	inputBox.TextSize = 13
-	inputBox.TextXAlignment = Enum.TextXAlignment.Left
-	inputBox.TextYAlignment = Enum.TextYAlignment.Center
-	inputBox.ClipsDescendants = true
-	inputBox.Size = UDim2.fromScale(1, 1)
-	inputBox.ZIndex = BASE_Z + 2
-	inputBox.Parent = pill
- 
-	jan:Add(inputBox.Focused:Connect(function()
-		Tween(pillStroke, { Color = SilentUI.Theme.Accent, Transparency = 0.3 }, 0.15)
-	end))
-	jan:Add(inputBox.FocusLost:Connect(function()
-		Tween(pillStroke, { Color = SilentUI.Theme.Border, Transparency = 0.9 }, 0.15)
-	end))
- 
-	local sendBtn = Instance.new("TextButton")
-	sendBtn.Name = "Send"
-	sendBtn.Text = ""
-	sendBtn.AutoButtonColor = false
-	sendBtn.BackgroundColor3 = SilentUI.Theme.Surface
-	sendBtn.BackgroundTransparency = 0.9
-	sendBtn.BorderSizePixel = 0
-	sendBtn.AnchorPoint = Vector2.new(1, 0)
-	sendBtn.Position = UDim2.new(1, 0, 0, 0)
-	sendBtn.Size = UDim2.fromOffset(INPUT_H, INPUT_H)
-	sendBtn.ZIndex = BASE_Z + 1
-	sendBtn.Parent = inputRow
-	Corner(sendBtn, 9)
- 
-	local sendIcon = Instance.new("ImageLabel")
-	sendIcon.BackgroundTransparency = 1
-	sendIcon.Image = ResolveIcon("send")
-	sendIcon.ImageColor3 = SilentUI.Theme.Text
-	sendIcon.Size = UDim2.fromOffset(14, 14)
-	sendIcon.AnchorPoint = Vector2.new(0.5, 0.5)
-	sendIcon.Position = UDim2.fromScale(0.5, 0.5)
-	sendIcon.ZIndex = BASE_Z + 2
-	sendIcon.Parent = sendBtn
- 
-	jan:Add(sendBtn.MouseEnter:Connect(function() Tween(sendBtn, { BackgroundTransparency = 0.8 }, 0.12) end))
-	jan:Add(sendBtn.MouseLeave:Connect(function() Tween(sendBtn, { BackgroundTransparency = 0.9 }, 0.12) end))
- 
-	local msgScroll = Instance.new("ScrollingFrame")
-	msgScroll.BackgroundTransparency = 1
-	msgScroll.BorderSizePixel = 0
-	msgScroll.Position = UDim2.fromOffset(0, HEADER_H + 9)
-	msgScroll.Size = UDim2.new(1, 0, 1, -(HEADER_H + 9 + INPUT_H + 10))
-	msgScroll.ScrollingDirection = Enum.ScrollingDirection.Y
-	msgScroll.ScrollBarThickness = 0
-	msgScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-	msgScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-	msgScroll.ZIndex = BASE_Z
-	msgScroll.Parent = content
- 
-	local msgPad = Instance.new("UIPadding")
-	msgPad.PaddingRight = UDim.new(0, 18)
-	msgPad.Parent = msgScroll
- 
-	local msgLayout = Instance.new("UIListLayout")
-	msgLayout.Padding = UDim.new(0, 8)
-	msgLayout.SortOrder = Enum.SortOrder.LayoutOrder
-	msgLayout.Parent = msgScroll
- 
-	AddScrollbar(msgScroll)
-	Private.AddContentScrollThumb(msgScroll, msgLayout, panel, jan)
- 
-	local order = 0
-	local transcript = {}
- 
-	local pinnedToBottom = true
-	jan:Add(msgScroll:GetPropertyChangedSignal("AbsoluteCanvasSize"):Connect(function()
-		if pinnedToBottom then
-			msgScroll.CanvasPosition = Vector2.new(0, msgScroll.AbsoluteCanvasSize.Y)
-		end
-	end))
-	jan:Add(msgScroll:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
-		local atBottom = msgScroll.CanvasPosition.Y
-			>= msgScroll.AbsoluteCanvasSize.Y - msgScroll.AbsoluteWindowSize.Y - 20
-		pinnedToBottom = atBottom
-	end))
- 
-	local function scrollToBottom()
-		pinnedToBottom = true
-		task.defer(function()
-			if msgScroll and msgScroll.Parent then
-				msgScroll.CanvasPosition = Vector2.new(0, msgScroll.AbsoluteCanvasSize.Y)
-			end
-		end)
-	end
- 
-	local AVATAR = 26
- 
-	local function addBubble(text, role)
-		local isUser = role == "user"
-		order = order + 1
- 
-		text = text:gsub("^%s+", ""):gsub("%s+$", ""):gsub("\n\n\n+", "\n\n")
- 
-		local row = Instance.new("Frame")
-		row.Name = "MessageRow"
-		row.BackgroundTransparency = 1
-		row.AutomaticSize = Enum.AutomaticSize.Y
-		row.Size = UDim2.new(1, 0, 0, 0)
-		row.LayoutOrder = order
-		row.ZIndex = BASE_Z + 1
-		row.Parent = msgScroll
- 
-		local rowScale = Instance.new("UIScale")
-		rowScale.Scale = 0.92
-		rowScale.Parent = row
- 
-		local rowLayout = Instance.new("UIListLayout")
-		rowLayout.FillDirection = Enum.FillDirection.Horizontal
-		rowLayout.HorizontalAlignment = isUser and Enum.HorizontalAlignment.Right or Enum.HorizontalAlignment.Left
-		rowLayout.VerticalAlignment = Enum.VerticalAlignment.Top
-		rowLayout.Padding = UDim.new(0, 8)
-		rowLayout.Parent = row
- 
-		local avatarFinalTransparency = isUser and 0.85 or 0.82
-		local avatar = Instance.new("Frame")
-		avatar.Name = "Avatar"
-		avatar.BackgroundColor3 = SilentUI.Theme.Accent
-		avatar.BackgroundTransparency = 1
-		avatar.BorderSizePixel = 0
-		avatar.Size = UDim2.fromOffset(AVATAR, AVATAR)
-		avatar.LayoutOrder = isUser and 2 or 1
-		avatar.ZIndex = BASE_Z + 2
-		avatar.Parent = row
-		Corner(avatar, AVATAR / 2)
- 
-		local avatarIcon
-		if isUser then
-			local img = Instance.new("ImageLabel")
-			img.BackgroundTransparency = 1
-			img.ImageTransparency = 1
-			img.ScaleType = Enum.ScaleType.Crop
-			img.Size = UDim2.fromScale(1, 1)
-			img.ZIndex = BASE_Z + 3
-			img.Parent = avatar
-			Corner(img, AVATAR / 2)
-			avatarIcon = img
-			task.spawn(function()
-				local ok, content = pcall(
-					Players.GetUserThumbnailAsync,
-					Players,
-					LocalPlayer.UserId,
-					Enum.ThumbnailType.HeadShot,
-					Enum.ThumbnailSize.Size100x100
-				)
-				if ok and content and img.Parent then
-					img.Image = content
-				end
-			end)
-		else
-			local botIcon = Instance.new("ImageLabel")
-			botIcon.BackgroundTransparency = 1
-			botIcon.ImageTransparency = 1
-			botIcon.Image = ResolveIcon("bot")
-			botIcon.ImageColor3 = SilentUI.Theme.Accent
-			botIcon.Size = UDim2.fromOffset(14, 14)
-			botIcon.AnchorPoint = Vector2.new(0.5, 0.5)
-			botIcon.Position = UDim2.fromScale(0.5, 0.5)
-			botIcon.ZIndex = BASE_Z + 3
-			botIcon.Parent = avatar
-			avatarIcon = botIcon
-		end
- 
-		local segments = Private.SplitMessageSegments(text)
-		local hasCode = false
-		for _, seg in ipairs(segments) do
-			if seg.kind == "code" then hasCode = true end
-		end
- 
-		local H_PAD, V_PAD = 10, 8
-		local BUBBLE_MAX_WIDTH = hasCode and 380 or 260
-		local bubbleWidth
-		if hasCode then
-			bubbleWidth = BUBBLE_MAX_WIDTH
-		else
-			local naturalW = MeasureText(segments[1].content, 13, 10000)
-			bubbleWidth = math.min(naturalW, BUBBLE_MAX_WIDTH - H_PAD * 2) + H_PAD * 2
-		end
-		if msgScroll.AbsoluteSize.X > 0 then
-			bubbleWidth = math.min(bubbleWidth, math.max(200, msgScroll.AbsoluteSize.X - 20))
-		end
- 
-		local bubbleFinalTransparency = isUser and 0.72 or 0.9
-		local bubble = Instance.new("Frame")
-		bubble.Name = "Bubble"
-		bubble.BackgroundColor3 = isUser and SilentUI.Theme.Accent or SilentUI.Theme.Surface
-		bubble.BackgroundTransparency = 1
-		bubble.BorderSizePixel = 0
-		bubble.AutomaticSize = Enum.AutomaticSize.Y
-		bubble.Size = UDim2.fromOffset(bubbleWidth, 0)
-		bubble.LayoutOrder = isUser and 1 or 2
-		bubble.ZIndex = BASE_Z + 2
-		bubble.Parent = row
-		Corner(bubble, 12)
-		local strokeFinalTransparency = isUser and 0.8 or 0.9
-		local bubbleStroke = Stroke(bubble, SilentUI.Theme.Border, 1, 1)
- 
-		local bubblePad = Instance.new("UIPadding")
-		bubblePad.PaddingTop = UDim.new(0, V_PAD)
-		bubblePad.PaddingBottom = UDim.new(0, V_PAD)
-		bubblePad.PaddingLeft = UDim.new(0, H_PAD)
-		bubblePad.PaddingRight = UDim.new(0, H_PAD)
-		bubblePad.Parent = bubble
- 
-		local bubbleLayout = Instance.new("UIListLayout")
-		bubbleLayout.FillDirection = Enum.FillDirection.Vertical
-		bubbleLayout.Padding = UDim.new(0, 8)
-		bubbleLayout.SortOrder = Enum.SortOrder.LayoutOrder
-		bubbleLayout.Parent = bubble
- 
-		Tween(avatar, { BackgroundTransparency = avatarFinalTransparency }, 0.16)
-		Tween(avatarIcon, { ImageTransparency = 0 }, 0.16)
-		Tween(bubble, { BackgroundTransparency = bubbleFinalTransparency }, 0.16)
-		Tween(bubbleStroke, { Transparency = strokeFinalTransparency }, 0.16)
-		Tween(rowScale, { Scale = 1 }, 0.22, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
- 
-		local TYPE_START_DELAY = 0.08
-		local maxTypeDuration = 0
- 
-		for i, seg in ipairs(segments) do
-			if seg.kind == "code" then
-				local card = Instance.new("Frame")
-				card.Name = "CodeBlock"
-				card.BackgroundColor3 = SilentUI.Theme.Background
-				card.BackgroundTransparency = 0.1
-				card.BorderSizePixel = 0
-				card.ClipsDescendants = true
-				card.AutomaticSize = Enum.AutomaticSize.Y
-				card.Size = UDim2.new(1, 0, 0, 0)
-				card.LayoutOrder = i
-				card.ZIndex = BASE_Z + 3
-				card.Parent = bubble
-				Corner(card, 8)
-				Stroke(card, SilentUI.Theme.Border, 1, 0.92)
- 
-				local cardLayout = Instance.new("UIListLayout")
-				cardLayout.FillDirection = Enum.FillDirection.Vertical
-				cardLayout.SortOrder = Enum.SortOrder.LayoutOrder
-				cardLayout.Parent = card
- 
-				local header = Instance.new("Frame")
-				header.BackgroundTransparency = 1
-				header.Size = UDim2.new(1, 0, 0, 24)
-				header.LayoutOrder = 1
-				header.ZIndex = BASE_Z + 4
-				header.Parent = card
- 
-				local langLabel = Instance.new("TextLabel")
-				langLabel.BackgroundTransparency = 1
-				langLabel.FontFace = SilentUI.Theme.FontRegular
-				langLabel.Text = seg.lang
-				langLabel.TextColor3 = SilentUI.Theme.TextDim
-				langLabel.TextSize = 11
-				langLabel.TextXAlignment = Enum.TextXAlignment.Left
-				langLabel.Position = UDim2.fromOffset(10, 0)
-				langLabel.Size = UDim2.new(1, -70, 1, 0)
-				langLabel.ZIndex = BASE_Z + 5
-				langLabel.Parent = header
- 
-				local function codeHeaderButton(icon, rightOffset)
-					local btn = Instance.new("TextButton")
-					btn.Text = ""
-					btn.AutoButtonColor = false
-					btn.BackgroundColor3 = SilentUI.Theme.Surface
-					btn.BackgroundTransparency = 1
-					btn.BorderSizePixel = 0
-					btn.AnchorPoint = Vector2.new(1, 0.5)
-					btn.Position = UDim2.new(1, -rightOffset, 0.5, 0)
-					btn.Size = UDim2.fromOffset(20, 20)
-					btn.ZIndex = BASE_Z + 5
-					btn.Parent = header
-					Corner(btn, 5)
- 
-					local ic = Instance.new("ImageLabel")
-					ic.BackgroundTransparency = 1
-					ic.Image = ResolveIcon(icon)
-					ic.ImageColor3 = SilentUI.Theme.TextDim
-					ic.Size = UDim2.fromOffset(12, 12)
-					ic.AnchorPoint = Vector2.new(0.5, 0.5)
-					ic.Position = UDim2.fromScale(0.5, 0.5)
-					ic.ZIndex = BASE_Z + 6
-					ic.Parent = btn
- 
-					jan:Add(btn.MouseEnter:Connect(function()
-						Tween(btn, { BackgroundTransparency = 0.85 }, 0.12)
-						Tween(ic, { ImageColor3 = SilentUI.Theme.Text }, 0.12)
-					end))
-					jan:Add(btn.MouseLeave:Connect(function()
-						Tween(btn, { BackgroundTransparency = 1 }, 0.12)
-						Tween(ic, { ImageColor3 = SilentUI.Theme.TextDim }, 0.12)
-					end))
- 
-					return btn, ic
-				end
- 
-				local copyBtn, copyIcon = codeHeaderButton("copy", 8)
-				jan:Add(copyBtn.MouseButton1Click:Connect(function()
-					local setclipboard = hasFn("setclipboard")
-					if not setclipboard then return end
-					pcall(setclipboard, seg.content)
-					Tween(copyIcon, { ImageColor3 = Color3.fromRGB(120, 220, 140) }, 0.1)
-					task.delay(0.4, function()
-						if copyIcon.Parent then
-							Tween(copyIcon, { ImageColor3 = SilentUI.Theme.TextDim }, 0.15)
-						end
-					end)
-				end))
- 
-				if opts.OnRunCode then
-					local runBtn, runIcon = codeHeaderButton("play", 32)
-					jan:Add(runBtn.MouseButton1Click:Connect(function()
-						SilentUI:Confirm({
-							Title = "Run this code?",
-							Text = "This runs exactly what's shown above, right now, in this game.",
-							ConfirmText = "Run",
-							CancelText = "Cancel",
-							Danger = true,
-							Window = self,
-							Callback = function(confirmed)
-								if not confirmed then return end
-								local ok, err = pcall(opts.OnRunCode, seg.content, seg.lang)
-								SilentUI:Notify({
-									Title = ok and "Ran" or "Run failed",
-									Text = ok and "Code executed." or tostring(err),
-									Type = ok and "success" or "error",
-									Duration = 3,
-								})
-							end,
-						})
-					end))
-				end
- 
-				local headerDivider = Instance.new("Frame")
-				headerDivider.BackgroundColor3 = SilentUI.Theme.Surface
-				headerDivider.BackgroundTransparency = 0.92
-				headerDivider.BorderSizePixel = 0
-				headerDivider.Size = UDim2.new(1, 0, 0, 1)
-				headerDivider.LayoutOrder = 2
-				headerDivider.ZIndex = BASE_Z + 4
-				headerDivider.Parent = card
- 
-				local codeContainer = Instance.new("Frame")
-				codeContainer.BackgroundTransparency = 1
-				codeContainer.AutomaticSize = Enum.AutomaticSize.Y
-				codeContainer.Size = UDim2.new(1, 0, 0, 0)
-				codeContainer.LayoutOrder = 3
-				codeContainer.ZIndex = BASE_Z + 4
-				codeContainer.Parent = card
- 
-				local codePad = Instance.new("UIPadding")
-				codePad.PaddingTop = UDim.new(0, 8)
-				codePad.PaddingBottom = UDim.new(0, 8)
-				codePad.PaddingLeft = UDim.new(0, 10)
-				codePad.PaddingRight = UDim.new(0, 10)
-				codePad.Parent = codeContainer
- 
-				local codeLabel = Instance.new("TextLabel")
-				codeLabel.BackgroundTransparency = 1
-				codeLabel.FontFace = Font.new(Private.CHAT_CODE_FONT, Enum.FontWeight.Regular, Enum.FontStyle.Normal)
-				codeLabel.RichText = true
-				codeLabel.Text = Private.HighlightLua(Private.EscapeRichText(seg.content))
-				codeLabel.TextColor3 = SilentUI.Theme.Text
-				codeLabel.TextSize = 12
-				codeLabel.TextWrapped = true
-				codeLabel.TextXAlignment = Enum.TextXAlignment.Left
-				codeLabel.TextYAlignment = Enum.TextYAlignment.Top
-				codeLabel.LineHeight = 1.3
-				codeLabel.AutomaticSize = Enum.AutomaticSize.Y
-				codeLabel.Size = UDim2.new(1, 0, 0, 16)
-				codeLabel.ZIndex = BASE_Z + 5
-				codeLabel.Parent = codeContainer
-			else
-				local label = Instance.new("TextLabel")
-				label.Name = "Prose"
-				label.BackgroundTransparency = 1
-				label.FontFace = SilentUI.Theme.FontRegular
-				label.RichText = true
-				label.Text = Private.MarkdownToRichText(seg.content)
-				label.TextColor3 = SilentUI.Theme.Text
-				label.TextTransparency = 1
-				label.TextSize = 13
-				label.TextWrapped = true
-				label.TextXAlignment = Enum.TextXAlignment.Left
-				label.TextYAlignment = Enum.TextYAlignment.Top
-				label.LineHeight = 1.3
-				label.AutomaticSize = Enum.AutomaticSize.Y
-				label.Size = UDim2.new(1, 0, 0, 16)
-				label.LayoutOrder = i
-				label.ZIndex = BASE_Z + 3
- 
-				label.MaxVisibleGraphemes = 0
-				label.Parent = bubble
- 
-				Tween(label, { TextTransparency = 0 }, 0.16)
- 
-				local graphemeCount = utf8.len(seg.content) or #seg.content
-				local typeDuration = math.clamp(graphemeCount * 0.014, 0.12, 1.6)
-				maxTypeDuration = math.max(maxTypeDuration, typeDuration)
-				task.delay(TYPE_START_DELAY, function()
-					if label and label.Parent then
-						TweenService:Create(
-							label,
-							TweenInfo.new(typeDuration, Enum.EasingStyle.Linear),
-							{ MaxVisibleGraphemes = graphemeCount }
-						):Play()
-					end
-				end)
-			end
-		end
- 
-		scrollToBottom()
-		table.insert(transcript, (isUser and "You" or "Assistant") .. ": " .. text)
- 
-		return TYPE_START_DELAY + maxTypeDuration
-	end
- 
-	local bumpTypingToBottom
- 
-	local function addToolLine(name)
-		order = order + 1
-		local row = Instance.new("Frame")
-		row.Name = "ToolCall"
-		row.BackgroundTransparency = 1
-		row.AutomaticSize = Enum.AutomaticSize.Y
-		row.Size = UDim2.new(1, 0, 0, 18)
-		row.LayoutOrder = order
-		row.ZIndex = BASE_Z + 1
-		row.Parent = msgScroll
- 
-		local rowLayout = Instance.new("UIListLayout")
-		rowLayout.FillDirection = Enum.FillDirection.Horizontal
-		rowLayout.VerticalAlignment = Enum.VerticalAlignment.Center
-		rowLayout.Padding = UDim.new(0, 6)
-		rowLayout.Parent = row
- 
-		local toolIcon = Instance.new("ImageLabel")
-		toolIcon.BackgroundTransparency = 1
-		toolIcon.Image = ResolveIcon("wrench")
-		toolIcon.ImageColor3 = SilentUI.Theme.Accent
-		toolIcon.Size = UDim2.fromOffset(11, 11)
-		toolIcon.LayoutOrder = 1
-		toolIcon.ZIndex = BASE_Z + 2
-		toolIcon.Parent = row
- 
-		local label = Instance.new("TextLabel")
-		label.BackgroundTransparency = 1
-		label.FontFace = SilentUI.Theme.FontRegular
-		label.Text = "Called tool: " .. tostring(name)
-		label.TextColor3 = SilentUI.Theme.TextDim
-		label.TextSize = 11
-		label.AutomaticSize = Enum.AutomaticSize.XY
-		label.Size = UDim2.fromOffset(0, 14)
-		label.LayoutOrder = 2
-		label.ZIndex = BASE_Z + 2
-		label.Parent = row
- 
-		scrollToBottom()
-		table.insert(transcript, "[Called tool: " .. tostring(name) .. "]")
-		if bumpTypingToBottom then bumpTypingToBottom() end
-	end
- 
-	local typingRow, typingTweens, typingActive = nil, nil, false
- 
-	local function destroyTypingRow()
-		if not typingRow then return end
-		for _, tw in ipairs(typingTweens) do tw:Cancel() end
-		local row = typingRow
-		typingRow, typingTweens = nil, nil
-		row:Destroy()
-	end
- 
-	local function buildTypingRow()
-		order = order + 1
- 
-		local row = Instance.new("Frame")
-		row.Name = "TypingRow"
-		row.BackgroundTransparency = 1
-		row.AutomaticSize = Enum.AutomaticSize.Y
-		row.Size = UDim2.new(1, 0, 0, 0)
-		row.LayoutOrder = order
-		row.ZIndex = BASE_Z + 1
-		row.Parent = msgScroll
- 
-		local rowLayout = Instance.new("UIListLayout")
-		rowLayout.FillDirection = Enum.FillDirection.Horizontal
-		rowLayout.VerticalAlignment = Enum.VerticalAlignment.Top
-		rowLayout.Padding = UDim.new(0, 8)
-		rowLayout.Parent = row
- 
-		local avatar = Instance.new("Frame")
-		avatar.BackgroundColor3 = SilentUI.Theme.Accent
-		avatar.BackgroundTransparency = 1
-		avatar.BorderSizePixel = 0
-		avatar.Size = UDim2.fromOffset(AVATAR, AVATAR)
-		avatar.LayoutOrder = 1
-		avatar.ZIndex = BASE_Z + 2
-		avatar.Parent = row
-		Corner(avatar, AVATAR / 2)
- 
-		local botIcon = Instance.new("ImageLabel")
-		botIcon.BackgroundTransparency = 1
-		botIcon.ImageTransparency = 1
-		botIcon.Image = ResolveIcon("bot")
-		botIcon.ImageColor3 = SilentUI.Theme.Accent
-		botIcon.Size = UDim2.fromOffset(14, 14)
-		botIcon.AnchorPoint = Vector2.new(0.5, 0.5)
-		botIcon.Position = UDim2.fromScale(0.5, 0.5)
-		botIcon.ZIndex = BASE_Z + 3
-		botIcon.Parent = avatar
- 
-		local bubble = Instance.new("Frame")
-		bubble.BackgroundColor3 = SilentUI.Theme.Surface
-		bubble.BackgroundTransparency = 1
-		bubble.BorderSizePixel = 0
-		bubble.Size = UDim2.fromOffset(38, AVATAR)
-		bubble.LayoutOrder = 2
-		bubble.ZIndex = BASE_Z + 2
-		bubble.Parent = row
-		Corner(bubble, 12)
-		local bubbleStroke = Stroke(bubble, SilentUI.Theme.Border, 1, 1)
- 
-		local tweens = {}
-		for i = 1, 3 do
-			local baseX = 10 + (i - 1) * 9
-			local dot = Instance.new("Frame")
-			dot.BackgroundColor3 = SilentUI.Theme.TextDim
-			dot.BackgroundTransparency = 1
-			dot.BorderSizePixel = 0
-			dot.AnchorPoint = Vector2.new(0.5, 0.5)
-			dot.Position = UDim2.new(0, baseX, 0.5, 0)
-			dot.Size = UDim2.fromOffset(4, 4)
-			dot.ZIndex = BASE_Z + 3
-			dot.Parent = bubble
-			Corner(dot, 2)
-			Tween(dot, { BackgroundTransparency = 0 }, 0.15)
- 
-			tweens[i] = TweenService:Create(
-				dot,
-				TweenInfo.new(0.45, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true, (i - 1) * 0.15),
-				{ Position = UDim2.new(0, baseX, 0.5, -3) }
-			)
-			tweens[i]:Play()
-		end
- 
-		Tween(avatar, { BackgroundTransparency = 0.82 }, 0.15)
-		Tween(botIcon, { ImageTransparency = 0 }, 0.15)
-		Tween(bubble, { BackgroundTransparency = 0.9 }, 0.15)
-		Tween(bubbleStroke, { Transparency = 0.9 }, 0.15)
- 
-		typingRow, typingTweens = row, tweens
-		scrollToBottom()
-	end
- 
-	local function showTyping()
-		if typingRow then return end
-		typingActive = true
-		buildTypingRow()
-	end
- 
-	function bumpTypingToBottom()
-		if not typingRow then return end
-		destroyTypingRow()
-		buildTypingRow()
-	end
- 
-	local function hideTyping()
-		if not typingActive then return end
-		typingActive = false
-		destroyTypingRow()
-	end
- 
-	local function addMessage(role, text)
-		text = tostring(text or "")
-		if text == "" then return end
-		hideTyping()
-		if role == "tool" then
-			addToolLine(text)
-			return nil
-		end
-		return addBubble(text, role)
-	end
- 
-	local function handleToolCall(name, args)
-		local tool = toolByName[name]
-		addToolLine(name)
-		if not tool or not tool.Handler then
-			addMessage("assistant", "Unknown tool: " .. tostring(name))
-			return nil
-		end
-		local ok, result = pcall(tool.Handler, args)
-		if not ok then
-			addMessage("assistant", "Tool error: " .. tostring(result))
-			return nil
-		end
-		return result
-	end
- 
-	local api
- 
-	local sending = false
-	local lastUserText = nil
- 
-	local function setSending(value)
-		sending = value
-		sendIcon.Image = ResolveIcon(value and "square" or "send")
-	end
- 
-	local function trySend(overrideText)
-		local text = overrideText or inputBox.Text
-		if sending or text == "" then return end
-		setSending(true)
-		if not overrideText then inputBox.Text = "" end
-		lastUserText = text
-		local revealTime = addMessage("user", text)
-		if opts.OnSend then
-			local finished = false
- 
-			task.spawn(function()
- 
-				if revealTime and revealTime > 0 then task.wait(revealTime) end
-				local ok, err = pcall(opts.OnSend, api, text)
-				if not ok then
-					addMessage("assistant", "Error: " .. tostring(err))
-				end
-				finished = true
-				setSending(false)
-			end)
- 
-			task.delay(opts.SendTimeout or 30, function()
-				if not finished and sending then
-					setSending(false)
-					hideTyping()
-					addMessage("assistant", "(Taking too long -- you can try sending again.)")
-				end
-			end)
-		else
-			setSending(false)
-		end
-	end
- 
-	local function tryRegenerate()
-		if sending or not lastUserText then return end
-		if opts.OnRegenerate then
-			task.spawn(opts.OnRegenerate, api, lastUserText)
-		else
-			trySend(lastUserText)
-		end
-	end
- 
-	local lastRealTab = nil
- 
-	local function openChat()
-		if self._currentTab == tabObj then return end
-		if self._currentTab and not self._currentTab.Hidden then
-			lastRealTab = self._currentTab
-		end
-		tabObj._select()
-	end
- 
-	local function closeChat()
-		if self._currentTab ~= tabObj then return end
-		if lastRealTab and not lastRealTab.Hidden then
-			lastRealTab._select()
-		elseif self._tabs[1] and self._tabs[1] ~= tabObj then
-			self._tabs[1]._select()
-		end
-	end
- 
-	table.insert(self._tabChangeListeners, function(selected)
-		if opts.OnToggle then task.spawn(opts.OnToggle, selected == tabObj) end
-	end)
- 
-	local function clearChat()
-		hideTyping()
-		for _, child in ipairs(msgScroll:GetChildren()) do
-			if child.Name == "MessageRow" or child.Name == "ToolCall" then
-				child:Destroy()
-			end
-		end
-		table.clear(transcript)
-		if opts.OnClear then task.spawn(opts.OnClear) end
-	end
- 
-	jan:Add(sendBtn.MouseButton1Click:Connect(function()
-		if sending then
-			if opts.OnStop then task.spawn(opts.OnStop, api) end
-		else
-			trySend()
-		end
-	end))
-	jan:Add(inputBox.FocusLost:Connect(function(enterPressed)
-		if enterPressed then trySend() end
-	end))
-	jan:Add(closeBtn.MouseButton1Click:Connect(closeChat))
- 
-	jan:Add(copyBtn.MouseButton1Click:Connect(function()
-		local setclipboard = hasFn("setclipboard")
-		if not setclipboard or #transcript == 0 then return end
-		pcall(setclipboard, table.concat(transcript, "\n\n"))
-		Tween(copyIcon, { ImageColor3 = Color3.fromRGB(120, 220, 140) }, 0.1)
-		task.delay(0.4, function()
-			if copyIcon.Parent then
-				Tween(copyIcon, { ImageColor3 = SilentUI.Theme.TextDim }, 0.15)
-			end
-		end)
-	end))
-	jan:Add(regenBtn.MouseButton1Click:Connect(function()
-		if sending or not lastUserText then return end
-		Tween(regenIcon, { Rotation = regenIcon.Rotation + 180 }, 0.25)
-		tryRegenerate()
-	end))
-	jan:Add(clearBtn.MouseButton1Click:Connect(function()
-		clearChat()
-		lastUserText = nil
-	end))
- 
-	api = {
-		Instance = panel,
-		Tab = tabObj,
-		Open = openChat,
-		Close = closeChat,
-		Toggle = function()
-			if self._currentTab == tabObj then closeChat() else openChat() end
-		end,
-		IsOpen = function() return self._currentTab == tabObj end,
-		AddMessage = function(_, role, text) addMessage(role, text) end,
-		LogToolCall = function(_, name) addToolLine(name) end,
-		HandleToolCall = function(_, name, args) return handleToolCall(name, args) end,
-		ShowTyping = function() showTyping() end,
-		HideTyping = function() hideTyping() end,
-		IsSending = function() return sending end,
-		Clear = function() clearChat() end,
-		Destroy = function() panel:Destroy() end,
-	}
- 
-	return api
 end
  
 function Window:AddCloudPanel(opts)
@@ -9045,6 +8127,12 @@ function Tab:AddSubTab(nameOrOpts)
 		jan:Add(RunService.Heartbeat:Connect(self._updateSubTabScrollbar))
  
 		self._subTabs = {}
+		self._subTabWidthUpdaters = {}
+		jan:Add(self._subTabHolder:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+			for _, updateWidth in pairs(self._subTabWidthUpdaters or {}) do
+				updateWidth()
+			end
+		end))
  
 		function self._syncSubIndicator(animated)
 			local sel = self._subTabs and self._subTabs[self.SelectedSubTab]
@@ -9081,8 +8169,8 @@ function Tab:AddSubTab(nameOrOpts)
 	btn.BackgroundColor3 = SilentUI.Theme.Surface
 	btn.BackgroundTransparency = 1
 	btn.BorderSizePixel = 0
-	btn.AutomaticSize = Enum.AutomaticSize.X
-	btn.Size = UDim2.fromOffset(0, 32)
+	btn.AutomaticSize = Enum.AutomaticSize.None
+	btn.Size = UDim2.fromOffset(72, 32)
 	btn.LayoutOrder = idx
 	btn.ZIndex = Z.Content
 	btn.Parent = self._subTabHolder
@@ -9119,13 +8207,39 @@ function Tab:AddSubTab(nameOrOpts)
 	lbl.TextColor3 = SilentUI.Theme.TextDim
 	lbl.TextSize = 13
 	lbl.TextXAlignment = Enum.TextXAlignment.Center
+	lbl.TextWrapped = false
+	lbl.TextTruncate = Enum.TextTruncate.AtEnd
 	lbl.TextYAlignment = Enum.TextYAlignment.Center
-	lbl.Size = UDim2.new(0, 0, 0, 32)
-	lbl.AutomaticSize = Enum.AutomaticSize.X
+	lbl.Size = UDim2.fromOffset(48, 32)
+	lbl.AutomaticSize = Enum.AutomaticSize.None
 	lbl.LayoutOrder = 2
 	lbl.ZIndex = Z.Content + 1
 	lbl.Parent = btn
 	if opts.NameKey then SilentUI:Localize(lbl, opts.NameKey) end
+
+	local function updateSubTabButtonWidth()
+		if not btn.Parent or not lbl.Parent then return end
+		local scale = math.max(GetUIScale(), 0.01)
+		local viewportWidth = self._subTabHolder and self._subTabHolder.AbsoluteSize.X / scale or 0
+		local maxLabelWidth = math.max(48, math.min(220, viewportWidth > 0 and viewportWidth - 48 or 220))
+		local measuredWidth = MeasureText(lbl.Text, lbl.TextSize, 10000)
+		local labelWidth = math.clamp(measuredWidth, 48, maxLabelWidth)
+		lbl.Size = UDim2.fromOffset(labelWidth, 32)
+		local iconWidth = ic and 22 or 0
+		local buttonWidth = math.max(64, math.ceil(labelWidth + iconWidth + 24))
+		btn.Size = UDim2.fromOffset(buttonWidth, 32)
+	end
+
+	self._subTabWidthUpdaters = self._subTabWidthUpdaters or {}
+	self._subTabWidthUpdaters[idx] = updateSubTabButtonWidth
+	jan:Add(lbl:GetPropertyChangedSignal("Text"):Connect(updateSubTabButtonWidth))
+	jan:Add(lbl:GetPropertyChangedSignal("TextSize"):Connect(updateSubTabButtonWidth))
+	jan:Add(btn.AncestryChanged:Connect(function(_, parent)
+		if parent == nil and self._subTabWidthUpdaters then
+			self._subTabWidthUpdaters[idx] = nil
+		end
+	end))
+	updateSubTabButtonWidth()
  
 	local group = Instance.new("Frame")
 	group.Name = title .. "Group"
@@ -9220,6 +8334,7 @@ function Tab:AddSubTab(nameOrOpts)
 		end
 	end))
  
+	task.defer(updateSubTabButtonWidth)
 	if not self.SelectedSubTab then
 		self:SelectSubTab(idx)
 	end
@@ -9480,6 +8595,8 @@ function SilentUI:BindEnabledWhen(control, condition, onChanged)
 	return control
 end
 
+-- Controls may share one persisted Flag only when the additional control opts in.
+-- SilentUI.Flags continues to expose the canonical controller; replicas are UI views.
 local SharedFlagGroups = {}
 
 function Private.ReadSharedFlagValue(api)
@@ -9682,205 +8799,270 @@ function Tab:AddLabel(textOrOptions)
 end
  
 function Tab:AddSection(textOrOpts, maybeIcon)
-	local opts = type(textOrOpts) == "table" and textOrOpts or { Text = textOrOpts, Icon = maybeIcon }
-	local text = tostring(opts.Text or "Section")
-	local iconAsset = opts.Icon and ResolveIcon(opts.Icon) or ""
-	local columnCount = (opts.Columns == true and 2) or math.clamp(tonumber(opts.Columns) or 1, 1, 2)
-	local windowId = self._window and self._window._id
- 
-	local holder = Instance.new("Frame")
-	holder.Name = "Section"
-	holder.BackgroundColor3 = SilentUI.Theme.Surface
-	holder.BackgroundTransparency = self._window and self._window._interfaceTransparency or 0.72
-	holder.AutomaticSize = Enum.AutomaticSize.Y
-	holder.Size = UDim2.new(1, 0, 0, 0)
-	holder.ZIndex = Z.Content
-	holder.Parent = self._page
-	holder:SetAttribute("SilentInterfacePanel", true)
-	if windowId then holder:SetAttribute("SilentWindowId", windowId) end
-	Corner(holder, SilentUI.Theme.CornerRadiusSm)
-	Stroke(holder, SilentUI.Theme.Border, 1, 0.92)
+    local opts = type(textOrOpts) == "table" and textOrOpts or { Text = textOrOpts, Icon = maybeIcon }
+    local text = tostring(opts.Text or "Section")
+    local iconAsset = opts.Icon and ResolveIcon(opts.Icon) or ""
+    local columnCount = (opts.Columns == true and 2) or math.clamp(tonumber(opts.Columns) or 1, 1, 2)
+    local stackAtWidth = math.clamp(tonumber(opts.StackAtWidth) or 560, 360, 900)
+    local windowId = self._window and self._window._id
 
-	local padding = Instance.new("UIPadding")
-	padding.PaddingTop = UDim.new(0, 7)
-	padding.PaddingBottom = UDim.new(0, 9)
-	padding.PaddingLeft = UDim.new(0, 10)
-	padding.PaddingRight = UDim.new(0, 10)
-	padding.Parent = holder
+    local holder = Instance.new("Frame")
+    holder.Name = "Section"
+    holder.BackgroundColor3 = SilentUI.Theme.Surface
+    holder.BackgroundTransparency = self._window and self._window._interfaceTransparency or 0.72
+    holder.AutomaticSize = Enum.AutomaticSize.Y
+    holder.Size = UDim2.new(1, 0, 0, 0)
+    holder.ZIndex = Z.Content
+    holder.Parent = self._page
+    holder:SetAttribute("SilentInterfacePanel", true)
+    if windowId then holder:SetAttribute("SilentWindowId", windowId) end
+    Corner(holder, SilentUI.Theme.CornerRadiusSm)
+    Stroke(holder, SilentUI.Theme.Border, 1, 0.92)
 
-	local holderLayout = Instance.new("UIListLayout")
-	holderLayout.Padding = UDim.new(0, 7)
-	holderLayout.SortOrder = Enum.SortOrder.LayoutOrder
-	holderLayout.Parent = holder
- 
-	local header = Instance.new("TextButton")
-	header.Name = "Header"
-	header.AutoButtonColor = false
-	header.BackgroundTransparency = 1
-	header.Size = UDim2.new(1, 0, 0, 22)
-	header.Text = ""
-	header.LayoutOrder = 1
-	header.ZIndex = Z.Content + 1
-	header.Parent = holder
+    local padding = Instance.new("UIPadding")
+    padding.PaddingTop = UDim.new(0, 7)
+    padding.PaddingBottom = UDim.new(0, 9)
+    padding.PaddingLeft = UDim.new(0, 10)
+    padding.PaddingRight = UDim.new(0, 10)
+    padding.Parent = holder
 
-	local x = 0
-	if iconAsset ~= "" then
-		local img = Instance.new("ImageLabel")
-		img.BackgroundTransparency = 1
-		img.Image = iconAsset
-		img.ImageColor3 = SilentUI.Theme.TextDim
-		img.Size = UDim2.fromOffset(13, 13)
-		img.Position = UDim2.fromOffset(0, 4)
-		img.ZIndex = Z.Content + 2
-		img.Parent = header
-		x = 13 + 7
-	end
- 
-	local label = Instance.new("TextLabel")
-	label.BackgroundTransparency = 1
-	label.FontFace = SilentUI.Theme.Font
-	label.Text = string.upper(text)
-	label.TextColor3 = SilentUI.Theme.TextDim
-	label.TextSize = 12
-	label.TextXAlignment = Enum.TextXAlignment.Left
-	label.TextTruncate = Enum.TextTruncate.AtEnd
-	label.Position = UDim2.fromOffset(x, 4)
-	label.Size = UDim2.new(1, -(x + 2), 0, 14)
-	label.ZIndex = Z.Content + 2
-	label.Parent = header
-	if opts.TextKey then SilentUI:Localize(label, opts.TextKey) end
+    local holderLayout = Instance.new("UIListLayout")
+    holderLayout.Padding = UDim.new(0, 7)
+    holderLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    holderLayout.Parent = holder
 
-	local collapseIcon
-	if opts.Collapsible then
-		collapseIcon = Instance.new("ImageLabel")
-		collapseIcon.Name = "CollapseIcon"
-		collapseIcon.BackgroundTransparency = 1
-		collapseIcon.Image = ResolveIcon("chevron-down")
-		collapseIcon.ImageColor3 = SilentUI.Theme.TextDim
-		collapseIcon.Size = UDim2.fromOffset(13, 13)
-		collapseIcon.AnchorPoint = Vector2.new(1, 0.5)
-		collapseIcon.Position = UDim2.new(1, 0, 0.5, 0)
-		collapseIcon.ZIndex = Z.Content + 2
-		collapseIcon.Parent = header
-		label.Size = UDim2.new(1, -(x + 22), 0, 14)
-	end
+    local header = Instance.new("TextButton")
+    header.Name = "Header"
+    header.AutoButtonColor = false
+    header.BackgroundTransparency = 1
+    header.Size = UDim2.new(1, 0, 0, 22)
+    header.Text = ""
+    header.LayoutOrder = 1
+    header.ZIndex = Z.Content + 1
+    header.Parent = holder
 
-	local body = Instance.new("Frame")
-	body.Name = "SectionContent"
-	body.BackgroundTransparency = 1
-	body.AutomaticSize = Enum.AutomaticSize.Y
-	body.Size = UDim2.new(1, 0, 0, 0)
-	body.LayoutOrder = 2
-	body.ZIndex = Z.Content + 1
-	body.Parent = holder
+    local x = 0
+    if iconAsset ~= "" then
+        local img = Instance.new("ImageLabel")
+        img.BackgroundTransparency = 1
+        img.Image = iconAsset
+        img.ImageColor3 = SilentUI.Theme.TextDim
+        img.Size = UDim2.fromOffset(13, 13)
+        img.Position = UDim2.fromOffset(0, 4)
+        img.ZIndex = Z.Content + 2
+        img.Parent = header
+        x = 20
+    end
 
-	local columns = {}
-	for i = 1, columnCount do
-		local column = Instance.new("Frame")
-		column.Name = "Column" .. i
-		column.BackgroundTransparency = 1
-		column.AutomaticSize = Enum.AutomaticSize.Y
-		column.ZIndex = Z.Content + 1
-		if columnCount == 1 then
-			column.Size = UDim2.new(1, 0, 0, 0)
-		else
-			column.Size = UDim2.new(0.5, -4, 0, 0)
-			column.Position = UDim2.new((i - 1) * 0.5, (i - 1) * 8, 0, 0)
-		end
-		column.Parent = body
-		local columnLayout = Instance.new("UIListLayout")
-		columnLayout.Padding = UDim.new(0, 7)
-		columnLayout.SortOrder = Enum.SortOrder.LayoutOrder
-		columnLayout.Parent = column
-		columns[i] = column
-	end
+    local label = Instance.new("TextLabel")
+    label.BackgroundTransparency = 1
+    label.FontFace = SilentUI.Theme.Font
+    label.Text = string.upper(text)
+    label.TextColor3 = SilentUI.Theme.TextDim
+    label.TextSize = 12
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.TextTruncate = Enum.TextTruncate.AtEnd
+    label.Position = UDim2.fromOffset(x, 4)
+    label.Size = UDim2.new(1, -(x + 22), 0, 14)
+    label.ZIndex = Z.Content + 2
+    label.Parent = header
+    if opts.TextKey then SilentUI:Localize(label, opts.TextKey) end
 
-	local collapsed = opts.Collapsible == true and opts.Collapsed == true
-	body.Visible = not collapsed
-	if collapseIcon and collapsed then collapseIcon.Rotation = -90 end
-	local section = {
-		Instance = holder,
-		Name = text,
-		_page = self._page,
-		_columns = columns,
-		_controls = {},
-		_columnOrders = {},
-		_columnCount = columnCount,
-		_nextColumn = 1,
-		_window = self._window,
-		_janitor = self._janitor,
-		_group = self._group,
-		_button = self._button,
-		_select = self._select,
-		_parentTab = self._parentTab,
-		_parentTabName = self._parentTabName,
-		_subTabIdx = self._subTabIdx,
-		Collapsed = collapsed,
-		Set = function(_, value) label.Text = string.upper(tostring(value or "")) end,
-		SetColumn = function(self, index)
-			index = math.floor(tonumber(index) or 1)
-			if index < 1 or index > self._columnCount then return false end
-			self._nextColumn = index
-			return true
-		end,
-		SetCollapsed = function(self, value)
-			self.Collapsed = value == true
-			body.Visible = not self.Collapsed
-			if self.Collapsed then
-				holder.AutomaticSize = Enum.AutomaticSize.None
-				holder.Size = UDim2.new(1, 0, 0, 38)
-			else
-				holder.AutomaticSize = Enum.AutomaticSize.Y
-				holder.Size = UDim2.new(1, 0, 0, 0)
-			end
-			if collapseIcon then collapseIcon.Rotation = self.Collapsed and -90 or 0 end
-		end,
-		ToggleCollapsed = function(self)
-			self:SetCollapsed(not self.Collapsed)
-		end,
-		Destroy = function(self)
-			for index = #self._controls, 1, -1 do
-				local control = self._controls[index]
-				if control and type(control.Destroy) == "function" then pcall(control.Destroy, control) end
-			end
-			table.clear(self._controls)
-			holder:Destroy()
-		end,
-	}
-	if collapsed then section:SetCollapsed(true) end
-	setmetatable(section, {
-		__index = function(self, key)
-			if key == "AddSection" then return nil end
-			local method = Tab[key]
-			if type(method) ~= "function" then return method end
-			return function(sectionSelf, ...)
-				local oldPage = sectionSelf._page
-				local columnIndex = sectionSelf._nextColumn or 1
-				sectionSelf._nextColumn = columnIndex % sectionSelf._columnCount + 1
-				sectionSelf._page = sectionSelf._columns[columnIndex] or sectionSelf._columns[1]
-				local arguments = table.pack(...)
-				local results = table.pack(pcall(method, sectionSelf, table.unpack(arguments, 1, arguments.n)))
-				sectionSelf._page = oldPage
-				if not results[1] then error(results[2], 2) end
-				local control = results[2]
-				if type(control) == "table" and type(control.Destroy) == "function" then
-					table.insert(sectionSelf._controls, control)
-					local columnOrders = sectionSelf._columnOrders
-					columnOrders[columnIndex] = (columnOrders[columnIndex] or 0) + 1
-					if typeof(control.Instance) == "Instance" then
-						pcall(function() control.Instance.LayoutOrder = columnOrders[columnIndex] end)
-					end
-				end
-				return table.unpack(results, 2, results.n)
-			end
-		end,
-	})
-	if opts.Collapsible then
-		header.MouseButton1Click:Connect(function() section:ToggleCollapsed() end)
-	end
-	return section
+    local collapseIcon
+    if opts.Collapsible then
+        collapseIcon = Instance.new("ImageLabel")
+        collapseIcon.Name = "CollapseIcon"
+        collapseIcon.BackgroundTransparency = 1
+        collapseIcon.Image = ResolveIcon("chevron-down")
+        collapseIcon.ImageColor3 = SilentUI.Theme.TextDim
+        collapseIcon.Size = UDim2.fromOffset(13, 13)
+        collapseIcon.AnchorPoint = Vector2.new(1, 0.5)
+        collapseIcon.Position = UDim2.new(1, 0, 0.5, 0)
+        collapseIcon.ZIndex = Z.Content + 2
+        collapseIcon.Parent = header
+    end
+
+    local body = Instance.new("Frame")
+    body.Name = "SectionContent"
+    body.BackgroundTransparency = 1
+    body.AutomaticSize = Enum.AutomaticSize.Y
+    body.Size = UDim2.new(1, 0, 0, 0)
+    body.LayoutOrder = 2
+    body.ZIndex = Z.Content + 1
+    body.Parent = holder
+
+    local columns, columnLayouts = {}, {}
+    for i = 1, columnCount do
+        local column = Instance.new("Frame")
+        column.Name = "Column" .. i
+        column.BackgroundTransparency = 1
+        column.AutomaticSize = Enum.AutomaticSize.Y
+        column.ZIndex = Z.Content + 1
+        if columnCount == 1 then
+            column.Size = UDim2.new(1, 0, 0, 0)
+        else
+            column.Size = UDim2.new(0.5, -4, 0, 0)
+            column.Position = UDim2.new((i - 1) * 0.5, (i - 1) * 8, 0, 0)
+        end
+        column.Parent = body
+
+        local columnLayout = Instance.new("UIListLayout")
+        columnLayout.Padding = UDim.new(0, 7)
+        columnLayout.SortOrder = Enum.SortOrder.LayoutOrder
+        columnLayout.Parent = column
+        columns[i] = column
+        columnLayouts[i] = columnLayout
+    end
+
+    local collapsed = opts.Collapsible == true and opts.Collapsed == true
+    local stacked = false
+    body.Visible = not collapsed
+    if collapseIcon and collapsed then collapseIcon.Rotation = -90 end
+
+    local section = {
+        Instance = holder,
+        Name = text,
+        _page = self._page,
+        _columns = columns,
+        _columnLayouts = columnLayouts,
+        _controls = {},
+        _columnOrders = {},
+        _columnCount = columnCount,
+        _nextColumn = 1,
+        _manualColumn = false,
+        _window = self._window,
+        _janitor = self._janitor,
+        _group = self._group,
+        _button = self._button,
+        _select = self._select,
+        _parentTab = self._parentTab,
+        _parentTabName = self._parentTabName,
+        _subTabIdx = self._subTabIdx,
+        Collapsed = collapsed,
+        Set = function(_, value) label.Text = string.upper(tostring(value or "")) end,
+        SetColumn = function(self, index)
+            index = math.floor(tonumber(index) or 1)
+            if index < 1 or index > self._columnCount then return false end
+            self._nextColumn = index
+            self._manualColumn = true
+            return true
+        end,
+        SetCollapsed = function(self, value)
+            self.Collapsed = value == true
+            body.Visible = not self.Collapsed
+            if self.Collapsed then
+                holder.AutomaticSize = Enum.AutomaticSize.None
+                holder.Size = UDim2.new(1, 0, 0, 38)
+            else
+                holder.AutomaticSize = Enum.AutomaticSize.Y
+                holder.Size = UDim2.new(1, 0, 0, 0)
+                task.defer(function() section.responsiveRelayout() end)
+            end
+            if collapseIcon then collapseIcon.Rotation = self.Collapsed and -90 or 0 end
+        end,
+        ToggleCollapsed = function(self)
+            self:SetCollapsed(not self.Collapsed)
+        end,
+        Destroy = function(self)
+            for index = #self._controls, 1, -1 do
+                local control = self._controls[index]
+                if control and type(control.Destroy) == "function" then pcall(control.Destroy, control) end
+            end
+            table.clear(self._controls)
+            holder:Destroy()
+        end,
+    }
+
+    function section.responsiveRelayout()
+        if not holder.Parent or section.Collapsed then return end
+        local width = holder.AbsoluteSize.X / GetUIScale()
+        if width <= 0 then return end
+        local shouldStack = columnCount > 1 and width < stackAtWidth
+        if shouldStack == stacked and not shouldStack then return end
+        stacked = shouldStack
+
+        if stacked then
+            body.AutomaticSize = Enum.AutomaticSize.None
+            body.Size = UDim2.new(1, 0, 0, 0)
+            local cursorY = 0
+            for index, column in ipairs(columns) do
+                local contentHeight = columnLayouts[index].AbsoluteContentSize.Y / GetUIScale()
+                if contentHeight <= 0 then contentHeight = 1 end
+                column.AutomaticSize = Enum.AutomaticSize.None
+                column.Position = UDim2.fromOffset(0, cursorY)
+                column.Size = UDim2.new(1, 0, 0, contentHeight)
+                cursorY += contentHeight + (index < #columns and 7 or 0)
+            end
+            body.Size = UDim2.new(1, 0, 0, math.max(0, cursorY - 7))
+        else
+            body.AutomaticSize = Enum.AutomaticSize.Y
+            body.Size = UDim2.new(1, 0, 0, 0)
+            for index, column in ipairs(columns) do
+                column.AutomaticSize = Enum.AutomaticSize.Y
+                column.Size = UDim2.new(0.5, -4, 0, 0)
+                column.Position = UDim2.new((index - 1) * 0.5, (index - 1) * 8, 0, 0)
+            end
+        end
+    end
+
+    if collapsed then section:SetCollapsed(true) end
+    setmetatable(section, {
+        __index = function(self, key)
+            if key == "AddSection" then return nil end
+            local method = Tab[key]
+            if type(method) ~= "function" then return method end
+            return function(sectionSelf, ...)
+                local oldPage = sectionSelf._page
+                local columnIndex
+                if sectionSelf._manualColumn then
+                    columnIndex = sectionSelf._nextColumn
+                    sectionSelf._manualColumn = false
+                elseif sectionSelf._columnCount > 1 and not stacked then
+                    local heights = sectionSelf._columnLayouts
+                    columnIndex = 1
+                    for index = 2, #heights do
+                        if heights[index].AbsoluteContentSize.Y < heights[columnIndex].AbsoluteContentSize.Y then
+                            columnIndex = index
+                        end
+                    end
+                else
+                    columnIndex = sectionSelf._nextColumn or 1
+                    if sectionSelf._columnCount == 1 then columnIndex = 1 end
+                end
+                sectionSelf._nextColumn = columnIndex % sectionSelf._columnCount + 1
+                sectionSelf._page = sectionSelf._columns[columnIndex] or sectionSelf._columns[1]
+                local arguments = table.pack(...)
+                local results = table.pack(pcall(method, sectionSelf, table.unpack(arguments, 1, arguments.n)))
+                sectionSelf._page = oldPage
+                if not results[1] then error(results[2], 2) end
+                local control = results[2]
+                if type(control) == "table" and type(control.Destroy) == "function" then
+                    table.insert(sectionSelf._controls, control)
+                    local columnOrders = sectionSelf._columnOrders
+                    columnOrders[columnIndex] = (columnOrders[columnIndex] or 0) + 1
+                    if typeof(control.Instance) == "Instance" then
+                        pcall(function() control.Instance.LayoutOrder = columnOrders[columnIndex] end)
+                    end
+                end
+                task.defer(function() sectionSelf.responsiveRelayout() end)
+                return table.unpack(results, 2, results.n)
+            end
+        end,
+    })
+
+    holder:GetPropertyChangedSignal("AbsoluteSize"):Connect(section.responsiveRelayout)
+    for _, columnLayout in ipairs(columnLayouts) do
+        columnLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+            task.defer(function() section.responsiveRelayout() end)
+        end)
+    end
+    if opts.Collapsible then
+        header.MouseButton1Click:Connect(function() section:ToggleCollapsed() end)
+    end
+    task.defer(section.responsiveRelayout)
+    return section
 end
- 
+
 function Tab:AddDivider()
 	local holder = Instance.new("Frame")
 	holder.Name = "Divider"
@@ -11053,157 +10235,186 @@ function Tab:AddLoadoutGroup(opts)
 end
  
 function Tab:AddInfoGrid(opts)
-	opts = opts or {}
-	local title = opts.Title or "Info"
-	local hasDesc = opts.Description and opts.Description ~= ""
-	local items = opts.Items or {}
-	local color = opts.Color
-	local columns = opts.Columns or 2
- 
-	local PAD = 12
-	local HEADER_H = hasDesc and 32 or 16
-	local CHIP_H = 38
-	local GRID_GAP = 8
-	local rows = math.ceil(#items / columns)
-	local gridH = rows > 0 and (rows * CHIP_H + (rows - 1) * GRID_GAP) or 0
-	local height = PAD * 2 + HEADER_H + (rows > 0 and (10 + gridH) or 0)
- 
-	local card = BaseCard(self._page, height)
-	self._window:_RegisterSearchable(self, title, card)
- 
-	local leftInset = 0
-	if color then
-		local accent = Instance.new("Frame")
-		accent.Name = "Accent"
-		accent.BackgroundColor3 = color
-		accent.BorderSizePixel = 0
-		accent.Size = UDim2.new(0, 3, 1, -12)
-		accent.Position = UDim2.fromOffset(0, 6)
-		accent.ZIndex = Z.Content + 1
-		accent.Parent = card
-		Corner(accent, 1.5)
-		leftInset = 6
-	end
- 
-	local pad = Instance.new("UIPadding")
-	pad.PaddingTop = UDim.new(0, PAD)
-	pad.PaddingBottom = UDim.new(0, PAD)
-	pad.PaddingLeft = UDim.new(0, PAD + leftInset)
-	pad.PaddingRight = UDim.new(0, PAD)
-	pad.Parent = card
- 
-	local titleLabel = Instance.new("TextLabel")
-	titleLabel.BackgroundTransparency = 1
-	titleLabel.FontFace = SilentUI.Theme.Font
-	titleLabel.Text = title
-	titleLabel.TextColor3 = SilentUI.Theme.Text
-	titleLabel.TextSize = 14
-	titleLabel.TextXAlignment = Enum.TextXAlignment.Left
-	titleLabel.TextTruncate = Enum.TextTruncate.AtEnd
-	titleLabel.Position = UDim2.fromOffset(0, 0)
-	titleLabel.Size = UDim2.new(1, 0, 0, 16)
-	titleLabel.ZIndex = Z.Content + 1
-	titleLabel.Parent = card
- 
-	if hasDesc then
-		local descLabel = Instance.new("TextLabel")
-		descLabel.BackgroundTransparency = 1
-		descLabel.FontFace = SilentUI.Theme.FontRegular
-		descLabel.Text = opts.Description
-		descLabel.TextColor3 = SilentUI.Theme.TextDim
-		descLabel.TextSize = 12
-		descLabel.TextWrapped = true
-		descLabel.TextXAlignment = Enum.TextXAlignment.Left
-		descLabel.TextYAlignment = Enum.TextYAlignment.Top
-		descLabel.Position = UDim2.fromOffset(0, 18)
-		descLabel.Size = UDim2.new(1, 0, 0, 14)
-		descLabel.ZIndex = Z.Content + 1
-		descLabel.Parent = card
-	end
- 
-	local chipValues = {}
- 
-	if rows > 0 then
-		local grid = Instance.new("Frame")
-		grid.Name = "Grid"
-		grid.BackgroundTransparency = 1
-		grid.Position = UDim2.fromOffset(0, HEADER_H + 10)
-		grid.Size = UDim2.new(1, 0, 0, gridH)
-		grid.ZIndex = Z.Content + 1
-		grid.Parent = card
- 
-		local gridLayout = Instance.new("UIGridLayout")
-		gridLayout.CellPadding = UDim2.fromOffset(GRID_GAP, GRID_GAP)
-		gridLayout.FillDirectionMaxCells = columns
-		gridLayout.SortOrder = Enum.SortOrder.LayoutOrder
-		gridLayout.Parent = grid
- 
-		local function relayout()
-			local w = grid.AbsoluteSize.X / GetUIScale()
-			if w <= 0 then return end
-			local cellW = (w - GRID_GAP * (columns - 1)) / columns
-			gridLayout.CellSize = UDim2.fromOffset(cellW, CHIP_H)
-		end
-		grid:GetPropertyChangedSignal("AbsoluteSize"):Connect(relayout)
-		task.defer(relayout)
- 
-		for i, item in ipairs(items) do
-			local chip = Instance.new("Frame")
-			chip.Name = "Chip" .. i
-			chip.BackgroundColor3 = SilentUI.Theme.Surface
-			chip.BackgroundTransparency = 0.95
-			chip.BorderSizePixel = 0
-			chip.LayoutOrder = i
-			chip.ZIndex = Z.Content + 2
-			chip.Parent = grid
-			Corner(chip, 6)
- 
-			local chipPad = Instance.new("UIPadding")
-			chipPad.PaddingTop = UDim.new(0, 6)
-			chipPad.PaddingLeft = UDim.new(0, 8)
-			chipPad.PaddingRight = UDim.new(0, 8)
-			chipPad.Parent = chip
- 
-			local labelLabel = Instance.new("TextLabel")
-			labelLabel.BackgroundTransparency = 1
-			labelLabel.FontFace = SilentUI.Theme.Font
-			labelLabel.Text = tostring(item.Label or "")
-			labelLabel.TextColor3 = SilentUI.Theme.Text
-			labelLabel.TextSize = 12
-			labelLabel.TextXAlignment = Enum.TextXAlignment.Left
-			labelLabel.TextTruncate = Enum.TextTruncate.AtEnd
-			labelLabel.Size = UDim2.new(1, 0, 0, 15)
-			labelLabel.ZIndex = Z.Content + 3
-			labelLabel.Parent = chip
- 
-			local valueLabel = Instance.new("TextLabel")
-			valueLabel.Name = "Value"
-			valueLabel.BackgroundTransparency = 1
-			valueLabel.FontFace = SilentUI.Theme.FontRegular
-			valueLabel.Text = tostring(item.Value or "")
-			valueLabel.TextColor3 = SilentUI.Theme.TextDim
-			valueLabel.TextSize = 11
-			valueLabel.TextXAlignment = Enum.TextXAlignment.Left
-			valueLabel.TextTruncate = Enum.TextTruncate.AtEnd
-			valueLabel.Position = UDim2.fromOffset(0, 15)
-			valueLabel.Size = UDim2.new(1, 0, 0, 12)
-			valueLabel.ZIndex = Z.Content + 3
-			valueLabel.Parent = chip
- 
-			if item.Label then chipValues[item.Label] = valueLabel end
-		end
-	end
- 
-	return {
-		Instance = card,
-		SetValue = function(_, label, value)
-			local lbl = chipValues[label]
-			if lbl then lbl.Text = tostring(value) end
-		end,
-		Destroy = function() card:Destroy() end,
-	}
+    opts = opts or {}
+    local title = opts.Title or "Info"
+    local description = opts.Description
+    local hasDesc = description ~= nil and description ~= ""
+    local items = opts.Items or {}
+    local color = opts.Color
+    local preferredColumns = math.clamp(math.floor(tonumber(opts.Columns) or 2), 1, 4)
+
+    local PAD = 12
+    local CHIP_H = 42
+    local GRID_GAP = 8
+    local MIN_CELL_WIDTH = math.clamp(tonumber(opts.MinCellWidth) or 132, 96, 220)
+    local HEADER_H = hasDesc and 38 or 18
+    local card = BaseCard(self._page, PAD * 2 + HEADER_H)
+    self._window:_RegisterSearchable(self, title, card)
+    card.AutomaticSize = Enum.AutomaticSize.None
+
+    local leftInset = 0
+    if color then
+        local accent = Instance.new("Frame")
+        accent.Name = "Accent"
+        accent.BackgroundColor3 = color
+        accent.BorderSizePixel = 0
+        accent.Size = UDim2.new(0, 3, 1, -12)
+        accent.Position = UDim2.fromOffset(0, 6)
+        accent.ZIndex = Z.Content + 1
+        accent.Parent = card
+        Corner(accent, 1.5)
+        leftInset = 6
+    end
+
+    local pad = Instance.new("UIPadding")
+    pad.PaddingTop = UDim.new(0, PAD)
+    pad.PaddingBottom = UDim.new(0, PAD)
+    pad.PaddingLeft = UDim.new(0, PAD + leftInset)
+    pad.PaddingRight = UDim.new(0, PAD)
+    pad.Parent = card
+
+    local titleLabel = Instance.new("TextLabel")
+    titleLabel.BackgroundTransparency = 1
+    titleLabel.FontFace = SilentUI.Theme.Font
+    titleLabel.Text = title
+    titleLabel.TextColor3 = SilentUI.Theme.Text
+    titleLabel.TextSize = 14
+    titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+    titleLabel.TextYAlignment = Enum.TextYAlignment.Center
+    titleLabel.TextTruncate = Enum.TextTruncate.AtEnd
+    titleLabel.Position = UDim2.fromOffset(0, 0)
+    titleLabel.Size = UDim2.new(1, 0, 0, 17)
+    titleLabel.ZIndex = Z.Content + 1
+    titleLabel.Parent = card
+
+    local descLabel
+    if hasDesc then
+        descLabel = Instance.new("TextLabel")
+        descLabel.BackgroundTransparency = 1
+        descLabel.FontFace = SilentUI.Theme.FontRegular
+        descLabel.Text = description
+        descLabel.TextColor3 = SilentUI.Theme.TextDim
+        descLabel.TextSize = 12
+        descLabel.TextWrapped = true
+        descLabel.TextXAlignment = Enum.TextXAlignment.Left
+        descLabel.TextYAlignment = Enum.TextYAlignment.Top
+        descLabel.Position = UDim2.fromOffset(0, 20)
+        descLabel.Size = UDim2.new(1, 0, 0, 16)
+        descLabel.ZIndex = Z.Content + 1
+        descLabel.Parent = card
+    end
+
+    local chipValues = {}
+    local grid, gridLayout
+    if #items > 0 then
+        grid = Instance.new("Frame")
+        grid.Name = "Grid"
+        grid.BackgroundTransparency = 1
+        grid.Position = UDim2.fromOffset(0, HEADER_H + 10)
+        grid.Size = UDim2.new(1, 0, 0, 0)
+        grid.ZIndex = Z.Content + 1
+        grid.Parent = card
+
+        gridLayout = Instance.new("UIGridLayout")
+        gridLayout.CellPadding = UDim2.fromOffset(GRID_GAP, GRID_GAP)
+        gridLayout.FillDirectionMaxCells = preferredColumns
+        gridLayout.SortOrder = Enum.SortOrder.LayoutOrder
+        gridLayout.Parent = grid
+
+        for i, item in ipairs(items) do
+            local chip = Instance.new("Frame")
+            chip.Name = "Chip" .. i
+            chip.BackgroundColor3 = SilentUI.Theme.Surface
+            chip.BackgroundTransparency = 0.95
+            chip.BorderSizePixel = 0
+            chip.LayoutOrder = i
+            chip.ZIndex = Z.Content + 2
+            chip.Parent = grid
+            Corner(chip, 6)
+
+            local chipPad = Instance.new("UIPadding")
+            chipPad.PaddingTop = UDim.new(0, 6)
+            chipPad.PaddingLeft = UDim.new(0, 8)
+            chipPad.PaddingRight = UDim.new(0, 8)
+            chipPad.Parent = chip
+
+            local labelLabel = Instance.new("TextLabel")
+            labelLabel.BackgroundTransparency = 1
+            labelLabel.FontFace = SilentUI.Theme.Font
+            labelLabel.Text = tostring(item.Label or "")
+            labelLabel.TextColor3 = SilentUI.Theme.Text
+            labelLabel.TextSize = 12
+            labelLabel.TextXAlignment = Enum.TextXAlignment.Left
+            labelLabel.TextTruncate = Enum.TextTruncate.AtEnd
+            labelLabel.Size = UDim2.new(1, 0, 0, 15)
+            labelLabel.ZIndex = Z.Content + 3
+            labelLabel.Parent = chip
+
+            local valueLabel = Instance.new("TextLabel")
+            valueLabel.Name = "Value"
+            valueLabel.BackgroundTransparency = 1
+            valueLabel.FontFace = SilentUI.Theme.FontRegular
+            valueLabel.Text = tostring(item.Value or "")
+            valueLabel.TextColor3 = SilentUI.Theme.TextDim
+            valueLabel.TextSize = 11
+            valueLabel.TextXAlignment = Enum.TextXAlignment.Left
+            valueLabel.TextTruncate = Enum.TextTruncate.AtEnd
+            valueLabel.Position = UDim2.fromOffset(0, 15)
+            valueLabel.Size = UDim2.new(1, 0, 0, 14)
+            valueLabel.ZIndex = Z.Content + 3
+            valueLabel.Parent = chip
+            if item.Label then chipValues[item.Label] = valueLabel end
+        end
+    end
+
+    local currentColumns = preferredColumns
+    local function responsiveRelayout()
+        if not card.Parent then return end
+        local width = card.AbsoluteSize.X / GetUIScale() - PAD * 2 - leftInset
+        if width <= 0 then return end
+
+        local headerHeight = 18
+        if descLabel then
+            local _, measured = MeasureText(descLabel.Text, 12, math.max(80, width))
+            headerHeight = 20 + math.max(16, measured) + 3
+            descLabel.Size = UDim2.new(1, 0, 0, math.max(16, measured))
+        end
+        HEADER_H = headerHeight
+
+        if grid and gridLayout then
+            currentColumns = math.clamp(
+                math.floor((width + GRID_GAP) / (MIN_CELL_WIDTH + GRID_GAP)),
+                1,
+                math.min(preferredColumns, #items)
+            )
+            local cellWidth = math.max(1, (width - GRID_GAP * (currentColumns - 1)) / currentColumns)
+            local rows = math.ceil(#items / currentColumns)
+            local gridHeight = rows > 0 and (rows * CHIP_H + (rows - 1) * GRID_GAP) or 0
+            gridLayout.FillDirectionMaxCells = currentColumns
+            gridLayout.CellSize = UDim2.fromOffset(cellWidth, CHIP_H)
+            grid.Position = UDim2.fromOffset(0, HEADER_H + 8)
+            grid.Size = UDim2.new(1, 0, 0, gridHeight)
+            card.Size = UDim2.new(1, 0, 0, PAD * 2 + HEADER_H + 8 + gridHeight)
+        else
+            card.Size = UDim2.new(1, 0, 0, PAD * 2 + HEADER_H)
+        end
+    end
+
+    if grid then grid:GetPropertyChangedSignal("AbsoluteSize"):Connect(responsiveRelayout) end
+    card:GetPropertyChangedSignal("AbsoluteSize"):Connect(responsiveRelayout)
+    task.defer(responsiveRelayout)
+
+    return {
+        Instance = card,
+        SetValue = function(_, label, value)
+            local lbl = chipValues[label]
+            if lbl then lbl.Text = tostring(value) end
+        end,
+        GetColumns = function() return currentColumns end,
+        Destroy = function() card:Destroy() end,
+    }
 end
- 
+
 function Tab:AddSystemInfoGrid(opts)
 	opts = opts or {}
 	local Stats = game:GetService("Stats")
@@ -11394,6 +10605,8 @@ function Tab:AddToggle(opts)
 	switchBg.Parent = card
 	Corner(switchBg, 11)
  
+	-- The disabled state stays translucent so the window background remains visible
+	-- through the control instead of turning into a flat gray pill.
 	local switchStroke = Stroke(
 		switchBg,
 		state and SilentUI.Theme.Accent or SilentUI.Theme.Border,
@@ -11582,7 +10795,8 @@ function Tab:AddSlider(opts)
 	local track = Instance.new("Frame")
 	track.Position = UDim2.new(0, 14, 1, -20)
 	track.Size = UDim2.new(1, -28, 0, 6)
-
+	-- Nearly transparent white overlay: no gray tint, so the window background
+	-- remains visible through the unfilled portion of the slider.
 	track.BackgroundColor3 = SilentUI.Theme.Surface
 	track.BackgroundTransparency = 0.91
 	track.BorderSizePixel = 0
@@ -11792,7 +11006,9 @@ function Private.ComputePopupPosition(window, card, w, h)
  
 	return math.round(px / s), math.round(py / s)
 end
+ 
 
+-- Asset previews are deliberately independent of window backgrounds.
 function Tab:AddAssetGrid(opts)
 	opts = opts or {}
 
@@ -14604,6 +13820,7 @@ function Tab:AddCardGrid(opts)
 	gridScroll.ZIndex = Z.Content + 1
 	gridScroll.Parent = content
  
+	-- Reserve room for the visible scrollbar so cards never sit underneath it.
 	local GRID_RIGHT_PAD = gridScroll.ScrollBarThickness > 0 and (gridScroll.ScrollBarThickness + 6) or 16
 	local GRID_TOP_PAD = 8
 	local GRID_BOTTOM_PAD = 8
@@ -15354,6 +14571,8 @@ function SilentUI:GetValues()
 	return values
 end
 
+-- Initialize controls after all tabs have been constructed and their saved values restored.
+-- Unlike Set(..., false), this does not change flags or emit OnChanged notifications.
 function SilentUI:InitializeCallbacks()
 	local pending = {}
 	for flag, api in pairs(self.Flags) do
@@ -15886,7 +15105,7 @@ end
  
 function SilentUI:RestoreSnapshot(snapshot, silent)
 	if type(snapshot) ~= "table" or type(snapshot.Data) ~= "table" then
-		return false, "invalid"
+		return false, "invalid snapshot"
 	end
 	return SilentUI:SetConfig(snapshot.Data, silent)
 end
@@ -15950,7 +15169,7 @@ function SilentUI:LoadAutoConfig()
 	if not readOk then warn("[SilentUI] automatic settings could not be read: " .. tostring(raw)); return false end
 	local decodeOk, data = pcall(function() return HttpService:JSONDecode(raw) end)
 	if not decodeOk or type(data) ~= "table" then
-		warn("[UI] automatic settings are malformed; using control defaults")
+		warn("[SilentUI] automatic settings are malformed; using control defaults")
 		return false
 	end
 	if type(data.Data) == "table" and data.Schema ~= nil then data = data.Data end
@@ -15973,28 +15192,28 @@ function SilentUI:ApplyAutoConfigFlag(flag)
 	table.sort(sources)
 	if #sources == 0 then return false end
 	if #sources > 1 then
-		warn("[UI] automatic settings contain conflicting values for '" .. flag .. "'; skipped")
+		warn("[SilentUI] automatic settings contain conflicting values for '" .. flag .. "'; skipped")
 		return false
 	end
 	local sourceFlag = sources[1]
 	local decodeOk, value = pcall(Private.Deserialize, pending[sourceFlag])
 	if not decodeOk then
-		warn("[UI] saved setting for '" .. flag .. "' could not be decoded: " .. tostring(value))
+		warn("[SilentUI] saved setting for '" .. flag .. "' could not be decoded: " .. tostring(value))
 		return false
 	end
 	local validator = self.ConfigValidators[flag]
 	if type(validator) ~= "function" then
-		warn("[UI] saved setting for '" .. flag .. "' was skipped: no validator is registered")
+		warn("[SilentUI] saved setting for '" .. flag .. "' was skipped: no validator is registered")
 		return false
 	end
 	local ok, valid, normalized, reason = pcall(validator, value)
 	if not ok or valid ~= true then
-		warn("[UI] saved setting for '" .. flag .. "' was skipped: " .. tostring(reason or normalized or valid))
+		warn("[SilentUI] saved setting for '" .. flag .. "' was skipped: " .. tostring(reason or normalized or valid))
 		return false
 	end
 	local getOk, snapshot = pcall(Private.ReadControlValue, api)
 	if not getOk then
-		warn("[UI] saved setting for '" .. flag .. "' could not be applied: getter failed: " .. tostring(snapshot))
+		warn("[SilentUI] saved setting for '" .. flag .. "' could not be applied: getter failed: " .. tostring(snapshot))
 		return false
 	end
 	local previousApplying = self._ApplyingConfig
@@ -16006,7 +15225,7 @@ function SilentUI:ApplyAutoConfigFlag(flag)
 	self._ApplyingAutoConfig = previousAutoApplying
 	self._ApplyingConfig = previousApplying
 	if not setOk then
-		warn("[UI] saved setting for '" .. flag .. "' could not be applied: " .. tostring(setErr))
+		warn("[SilentUI] saved setting for '" .. flag .. "' could not be applied: " .. tostring(setErr))
 		return false
 	end
 	self._AutoConfigApplied = self._AutoConfigApplied or {}
@@ -16054,6 +15273,8 @@ function SilentUI:GetInitialValue(flag)
 	return CopyInitialFlagValue(api._InitialValue)
 end
 
+-- Restores registered flags without mutating private helpers or replacing save methods.
+-- By default only the automatic settings file is deleted; named profiles are retained.
 function SilentUI:ResetConfiguration(opts)
 	opts = opts or {}
 	local clearAuto = opts.ClearAutoConfig ~= false
@@ -16364,287 +15585,330 @@ function SilentUI:CloudService(opts)
 	return api
 end
  
-function SilentUI:CreateAIAssistant(opts)
-	opts = opts or {}
-	local providers = opts.Providers or {}
-	local tools = opts.Tools or (opts.Window and opts.Window:_BuildDefaultChatTools()) or {}
-	local systemPrompt = opts.SystemPrompt
-		or (opts.Window and opts.Window:_BuildDefaultSystemPrompt())
-		or "You are a helpful assistant."
-	local maxRounds = opts.MaxRounds or 6
-	local maxTokens = opts.MaxTokens or 2048
-	local httpRequest = (syn and syn.request) or http_request or request
- 
-	local function toOpenAITools()
-		local out = {}
-		for _, tool in ipairs(tools) do
-			table.insert(out, {
-				type = "function",
-				["function"] = {
-					name        = tool.Name,
-					description = tool.Description,
-					parameters  = tool.Parameters,
-				},
-			})
-		end
-		return out
-	end
- 
-	local persistPath = nil
-	if opts.Persist then
-		local persistName = Private.SafeConfigName(tostring(opts.Persist)) .. ".chat.json"
-		persistPath = ASSETS_FOLDER .. "/" .. persistName
-	end
- 
-	local function loadHistory()
-		if not (persistPath and fn_isfile and fn_readfile) then return nil end
-		local existsOk, exists = pcall(fn_isfile, persistPath)
-		if existsOk and exists then
-			local ok, raw = pcall(fn_readfile, persistPath)
-			if ok then
-				local decodeOk, decoded = pcall(function() return HttpService:JSONDecode(raw) end)
-				if decodeOk and type(decoded) == "table" then return decoded end
-			end
-		end
-		return nil
-	end
- 
-	local conversation = loadHistory() or { { role = "system", content = systemPrompt } }
- 
-	local function saveHistory()
-		if not (persistPath and fn_writefile) then return end
-		Private.EnsureAssetsFolder()
-		pcall(fn_writefile, persistPath, HttpService:JSONEncode(conversation))
-	end
- 
-	local function callProvider(provider, messages)
-		local body = HttpService:JSONEncode({
-			model      = provider.Model,
-			messages   = messages,
-			tools      = toOpenAITools(),
-			max_tokens = maxTokens,
-		})
- 
-		local ok, res = pcall(httpRequest, {
-			Url = provider.Endpoint,
-			Method = "POST",
-			Headers = {
-				["Authorization"] = "Bearer " .. tostring(provider.ApiKey),
-				["Content-Type"]  = "application/json",
-			},
-			Body = body,
-		})
-		if not ok then return nil, tostring(res), false end
- 
-		if res.StatusCode and res.StatusCode ~= 200 then
-			local message = res.Body
-			local parseOk, parsed = pcall(function() return HttpService:JSONDecode(res.Body) end)
-			if parseOk and type(parsed) == "table" then
-				local errField = parsed.error
-				if type(errField) == "table" and errField.message then
-					message = tostring(errField.message)
-				elseif type(errField) == "string" then
-					message = errField
-				end
-			end
-			local rateLimited = res.StatusCode == 429
-			if rateLimited then message = message .. " (daily free-tier limit)" end
-			return nil, provider.Name .. " API error " .. tostring(res.StatusCode) .. ": " .. message, rateLimited
-		end
- 
-		local decodeOk, decoded = pcall(function() return HttpService:JSONDecode(res.Body) end)
-		if not decodeOk then return nil, provider.Name .. ": failed to decode API response.", false end
-		return decoded, nil, false
-	end
- 
-	local function callAI(messages)
-		if not httpRequest then
-			return nil, "Your executor doesn't support HTTP requests."
-		end
-		local lastErr = "No AI provider configured -- add at least one entry with an ApiKey to Providers."
-		for _, provider in ipairs(providers) do
-			if provider.ApiKey and provider.ApiKey ~= "" then
-				local decoded, err, rateLimited = callProvider(provider, messages)
-				if decoded then return decoded end
-				lastErr = err
-				if not rateLimited then return nil, lastErr end
-			end
-		end
-		return nil, lastErr
-	end
- 
-	local assistant = {}
-	local stopRequested = false
-	local busy = false
- 
-	function assistant:Stop()
-		stopRequested = true
-	end
- 
-	function assistant:IsBusy()
-		return busy
-	end
- 
-	function assistant:GetHistory()
-		return conversation
-	end
- 
-	function assistant:Reset()
-		table.clear(conversation)
-		table.insert(conversation, { role = "system", content = systemPrompt })
-		saveHistory()
-	end
- 
-	function assistant:Ask(panel, userText)
-		table.insert(conversation, { role = "user", content = userText })
-		panel:ShowTyping()
-		stopRequested = false
-		busy = true
- 
-		for _ = 1, maxRounds do
-			if stopRequested then
-				busy = false
-				panel:HideTyping()
-				panel:AddMessage("assistant", "(stopped)")
-				saveHistory()
-				return
-			end
- 
-			local response, err = callAI(conversation)
-			if not response then
-				busy = false
-				panel:HideTyping()
-				panel:AddMessage("assistant", "Error: " .. tostring(err))
-				saveHistory()
-				return
-			end
- 
-			local choice  = response.choices and response.choices[1]
-			local message = choice and choice.message
-			if not message then
-				busy = false
-				panel:HideTyping()
-				panel:AddMessage("assistant", "Error: empty response from API.")
-				saveHistory()
-				return
-			end
- 
-			table.insert(conversation, message)
- 
-			local calls = message.tool_calls
-			local hasCalls = calls and #calls > 0
-			local content = message.content or ""
- 
-			local _, fenceCount = content:gsub("```", "")
-			local truncated = choice.finish_reason == "length" or fenceCount % 2 == 1
- 
-			if message.content and message.content ~= "" then
-				if not hasCalls and not truncated then panel:HideTyping() end
-				panel:AddMessage("assistant", message.content)
-			end
- 
-			if hasCalls then
-				for _, call in ipairs(calls) do
-					local argsOk, args = pcall(function()
-						return HttpService:JSONDecode(call["function"].arguments)
-					end)
-					local result = panel:HandleToolCall(call["function"].name, argsOk and args or {})
-					table.insert(conversation, {
-						role = "tool",
-						tool_call_id = call.id,
-						content = HttpService:JSONEncode(result == nil and {} or result),
-					})
-				end
-			elseif truncated then
-				table.insert(conversation, {
-					role = "user",
-					content = "You got cut off. Continue exactly where you left off -- don't repeat "
-						.. "anything, don't restart the explanation.",
-				})
-			else
-				busy = false
-				panel:HideTyping()
-				saveHistory()
-				return
-			end
-		end
- 
-		busy = false
-		panel:HideTyping()
-		panel:AddMessage("assistant",
-			"(stopped after several rounds of tool calls/continuations -- ask me to continue if you need to)")
-		saveHistory()
-	end
- 
-	return assistant
+-- Shared drag controller for detachable bubbles and state panels.
+local FloatingInternals = {
+    Registry = {},
+    ByFrame = {},
+    ActiveDrag = nil,
+    NextOrder = 0,
+    Gap = 10,
+    Margin = 12,
+    ReflowQueued = false,
+}
+
+function FloatingInternals.Color(value, fallback)
+    return typeof(value) == "Color3" and value or fallback
 end
 
-local FloatingInternals = { Registry = {}, ActiveDrag = nil }
-function FloatingInternals.Color(value, fallback)
-	return typeof(value) == "Color3" and value or fallback
-end
 function FloatingInternals.Image(value)
-	if type(value) == "number" then return "rbxassetid://" .. tostring(value) end
-	if type(value) == "string" and value:match("^%d+$") then return "rbxassetid://" .. value end
-	if type(value) == "string" then return ResolveIcon(value) end
-	return ""
+    if type(value) == "number" then return "rbxassetid://" .. tostring(value) end
+    if type(value) == "string" and value:match("^%d+$") then return "rbxassetid://" .. value end
+    if type(value) == "string" then return ResolveIcon(value) end
+    return ""
 end
-function FloatingInternals.RegisterDrag(handle, frame, onTap, draggable, scope, allowOffscreen)
-	handle.Active = true
-	scope:Add(handle.InputBegan:Connect(function(input)
-		if FloatingInternals.ActiveDrag then return end
-		if input.UserInputType ~= Enum.UserInputType.MouseButton1
-			and input.UserInputType ~= Enum.UserInputType.Touch then return end
-		local root = SilentUI._Root
-		local scale = GetUIScale()
-		local pos = (frame.AbsolutePosition - root.AbsolutePosition) / scale
-		FloatingInternals.ActiveDrag = {
-			Input = input,
-			Frame = frame,
-			Start = Vector2.new(input.Position.X, input.Position.Y),
-			Position = pos,
-			Moved = false,
-			Draggable = draggable ~= false,
-			AllowOffscreen = allowOffscreen == true,
-			OnTap = onTap,
-		}
-	end))
-	scope:Add(function()
-		if FloatingInternals.ActiveDrag and FloatingInternals.ActiveDrag.Frame == frame then FloatingInternals.ActiveDrag = nil end
-	end)
+
+function FloatingInternals.GetFrame(widget)
+    return widget and (widget.Instance or widget.Frame)
+end
+
+function FloatingInternals.GetViewport()
+    local scale = math.max(GetUIScale(), 0.01)
+    local view = Private.ViewportSize() / scale
+    return view, scale
+end
+
+function FloatingInternals.GetLogicalRect(frame, scale)
+    local root = SilentUI._Root
+    if not frame or not frame.Parent or not root then return nil end
+    local localScale = 1
+    local widget = FloatingInternals.ByFrame[frame]
+    if widget and widget._FloatingScale then
+        localScale = math.max(widget._FloatingScale.Scale, 0.01)
+    end
+    local absolutePosition = (frame.AbsolutePosition - root.AbsolutePosition) / scale
+    local absoluteSize = frame.AbsoluteSize / (scale * localScale)
+    if absoluteSize.X <= 0 or absoluteSize.Y <= 0 then
+        absoluteSize = Vector2.new(
+            frame.Size.X.Offset > 0 and frame.Size.X.Offset or 52,
+            frame.Size.Y.Offset > 0 and frame.Size.Y.Offset or 44
+        )
+    end
+    return {
+        X = absolutePosition.X,
+        Y = absolutePosition.Y,
+        W = absoluteSize.X,
+        H = absoluteSize.Y,
+    }
+end
+
+function FloatingInternals.SetPosition(widget, x, y, animate)
+    local frame = FloatingInternals.GetFrame(widget)
+    if not frame or not frame.Parent then return end
+    local target = UDim2.fromOffset(math.floor(x + 0.5), math.floor(y + 0.5))
+    if animate then
+        Tween(frame, { Position = target }, 0.24, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+    else
+        frame.Position = target
+    end
+end
+
+function FloatingInternals.Bounce(widget)
+    local frame = FloatingInternals.GetFrame(widget)
+    if not frame or not frame.Parent then return end
+    local bounceScale = widget._FloatingBounceScale
+    if not bounceScale then
+        bounceScale = Instance.new("UIScale")
+        bounceScale.Name = "SilentFloatingBounceScale"
+        bounceScale.Scale = 1
+        bounceScale.Parent = frame
+        widget._FloatingBounceScale = bounceScale
+    end
+    bounceScale.Scale = 0.94
+    Tween(bounceScale, { Scale = 1 }, 0.34, Enum.EasingStyle.Elastic, Enum.EasingDirection.Out)
+end
+
+function FloatingInternals.IsOverlapping(a, b, gap)
+    return a.X < b.X + b.W + gap
+        and a.X + a.W + gap > b.X
+        and a.Y < b.Y + b.H + gap
+        and a.Y + a.H + gap > b.Y
+end
+
+function FloatingInternals.ResolveCollision(widget, requestedX, requestedY, animate)
+    local frame = FloatingInternals.GetFrame(widget)
+    if not frame or not frame.Parent then return false end
+    local view, scale = FloatingInternals.GetViewport()
+    local own = FloatingInternals.GetLogicalRect(frame, scale)
+    if not own then return false end
+
+    local margin = math.min(
+        FloatingInternals.Margin,
+        math.max(0, (view.X - 1) / 2),
+        math.max(0, (view.Y - 1) / 2)
+    )
+    local gap = FloatingInternals.Gap
+    local availableWidth = math.max(1, view.X - margin * 2)
+    local availableHeight = math.max(1, view.Y - margin * 2)
+    if own.W > availableWidth or own.H > availableHeight then
+        widget._FloatingAutoStack = true
+        FloatingInternals.Reflow(true)
+        return false
+    end
+    local x = math.clamp(tonumber(requestedX) or own.X, margin, math.max(margin, view.X - own.W - margin))
+    local y = math.clamp(tonumber(requestedY) or own.Y, margin, math.max(margin, view.Y - own.H - margin))
+    local others = {}
+    for other in pairs(FloatingInternals.Registry) do
+        if other ~= widget and not other._Destroyed and other.Instance and other.Instance.Visible then
+            local rect = FloatingInternals.GetLogicalRect(other.Instance, scale)
+            if rect then table.insert(others, rect) end
+        end
+    end
+    table.sort(others, function(left, right) return left.Y < right.Y end)
+
+    for _ = 1, math.max(8, #others * 3) do
+        local candidate = { X = x, Y = y, W = own.W, H = own.H }
+        local collision = nil
+        for _, otherRect in ipairs(others) do
+            if FloatingInternals.IsOverlapping(candidate, otherRect, gap) then
+                collision = otherRect
+                break
+            end
+        end
+        if not collision then
+            FloatingInternals.SetPosition(widget, x, y, animate)
+            return true
+        end
+
+        y = collision.Y + collision.H + gap
+        if y + own.H > view.Y - margin then
+            y = margin
+            x = collision.X + collision.W + gap
+        end
+        if x + own.W > view.X - margin then
+            -- No free manual slot remains. Join the managed vertical stack instead of overlapping.
+            widget._FloatingAutoStack = true
+            FloatingInternals.Reflow(true)
+            return false
+        end
+    end
+
+    widget._FloatingAutoStack = true
+    FloatingInternals.Reflow(true)
+    return false
+end
+
+function FloatingInternals.Reflow(animate)
+    if FloatingInternals.ReflowQueued then return end
+    FloatingInternals.ReflowQueued = true
+    task.defer(function()
+        FloatingInternals.ReflowQueued = false
+        local view, globalScale = FloatingInternals.GetViewport()
+        local list = {}
+        local maxWidth, totalHeight = 0, 0
+        for widget in pairs(FloatingInternals.Registry) do
+            local frame = FloatingInternals.GetFrame(widget)
+            if not widget._Destroyed and widget._FloatingAutoStack and frame and frame.Parent and frame.Visible then
+                local rect = FloatingInternals.GetLogicalRect(frame, globalScale)
+                if rect then
+                    table.insert(list, { Widget = widget, Rect = rect })
+                    maxWidth = math.max(maxWidth, rect.W)
+                    totalHeight += rect.H
+                end
+            end
+        end
+        table.sort(list, function(a, b)
+            return (a.Widget._FloatingOrder or 0) < (b.Widget._FloatingOrder or 0)
+        end)
+        if #list == 0 then return end
+
+        local margin = math.min(
+            FloatingInternals.Margin,
+            math.max(0, (view.X - 1) / 2),
+            math.max(0, (view.Y - 1) / 2)
+        )
+        local availableHeight = math.max(1, view.Y - margin * 2)
+        local availableWidth = math.max(1, view.X - margin * 2)
+        local gap = #list > 1 and math.min(FloatingInternals.Gap, availableHeight / (#list - 1)) or 0
+        local requiredHeight = totalHeight + gap * (#list - 1)
+        local fit = math.min(
+            1,
+            availableHeight / math.max(requiredHeight, 1),
+            availableWidth / math.max(maxWidth, 1)
+        )
+        fit = math.clamp(fit, 0.001, 1)
+
+        local y = margin
+        for _, item in ipairs(list) do
+            local widget, rect = item.Widget, item.Rect
+            if widget._FloatingScale then widget._FloatingScale.Scale = fit end
+            local width = rect.W * fit
+            local height = rect.H * fit
+            local x = math.clamp(margin, margin, math.max(margin, view.X - width - margin))
+            FloatingInternals.SetPosition(widget, x, y, animate == true)
+            y += height + gap
+        end
+
+        -- User-positioned panels remain movable, but are clamped and pushed clear of all others.
+        for widget in pairs(FloatingInternals.Registry) do
+            local frame = FloatingInternals.GetFrame(widget)
+            if not widget._Destroyed and not widget._FloatingAutoStack and frame and frame.Parent and frame.Visible then
+                local rect = FloatingInternals.GetLogicalRect(frame, globalScale)
+                if rect then FloatingInternals.ResolveCollision(widget, rect.X, rect.Y, false) end
+            end
+        end
+    end)
+end
+
+function FloatingInternals.Register(widget, opts, scope)
+    opts = opts or {}
+    local frame = FloatingInternals.GetFrame(widget)
+    if not frame then return end
+    FloatingInternals.NextOrder += 1
+    widget._FloatingOrder = FloatingInternals.NextOrder
+    widget._FloatingAutoStack = opts.AutoStack ~= false
+    local scale = Instance.new("UIScale")
+    scale.Name = "SilentFloatingLayoutScale"
+    scale.Scale = 1
+    scale.Parent = frame
+    widget._FloatingScale = scale
+    FloatingInternals.Registry[widget] = true
+    FloatingInternals.ByFrame[frame] = widget
+    scope:Add(function()
+        FloatingInternals.Registry[widget] = nil
+        FloatingInternals.ByFrame[frame] = nil
+        if widget._FloatingScale then widget._FloatingScale = nil end
+        task.defer(function() FloatingInternals.Reflow(true) end)
+    end)
+    scope:Add(SilentUI._Root:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+        FloatingInternals.Reflow(false)
+    end))
+    scope:Add(GlobalScale:GetPropertyChangedSignal("Scale"):Connect(function()
+        FloatingInternals.Reflow(false)
+    end))
+    -- AutomaticSize.Y can settle after AddItem() and after font/viewport changes.
+    -- Reflow from the final AbsoluteSize so adjacent floating panels never use stale heights.
+    scope:Add(frame:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+        FloatingInternals.Reflow(false)
+    end))
+    task.defer(function() FloatingInternals.Reflow(false) end)
+end
+
+function FloatingInternals.RegisterDrag(handle, frame, onTap, draggable, scope, _allowOffscreen, widget)
+    handle.Active = true
+    widget = widget or FloatingInternals.ByFrame[frame]
+    scope:Add(handle.InputBegan:Connect(function(input)
+        if FloatingInternals.ActiveDrag then return end
+        if input.UserInputType ~= Enum.UserInputType.MouseButton1
+            and input.UserInputType ~= Enum.UserInputType.Touch then return end
+        local view, scale = FloatingInternals.GetViewport()
+        local root = SilentUI._Root
+        local pos = (frame.AbsolutePosition - root.AbsolutePosition) / scale
+        FloatingInternals.ActiveDrag = {
+            Input = input,
+            Frame = frame,
+            Widget = widget,
+            Start = Vector2.new(input.Position.X, input.Position.Y),
+            Position = pos,
+            Moved = false,
+            Draggable = draggable ~= false,
+            OnTap = onTap,
+            EdgeFeedback = false,
+        }
+    end))
+    scope:Add(function()
+        if FloatingInternals.ActiveDrag and FloatingInternals.ActiveDrag.Frame == frame then
+            FloatingInternals.ActiveDrag = nil
+        end
+    end)
 end
 
 LibJanitor:Add(UserInputService.InputChanged:Connect(function(input)
-	local drag = FloatingInternals.ActiveDrag
-	if not drag or not drag.Draggable then return end
-	local mouse = drag.Input.UserInputType == Enum.UserInputType.MouseButton1
-	if (mouse and input.UserInputType ~= Enum.UserInputType.MouseMovement)
-		or (not mouse and input ~= drag.Input) then return end
-	local delta = Vector2.new(input.Position.X, input.Position.Y) - drag.Start
-	if delta.Magnitude < 6 and not drag.Moved then return end
-	drag.Moved = true
-	local scale = GetUIScale()
-	local root = SilentUI._Root
-	local position = drag.Position + delta / scale
-	if drag.AllowOffscreen then
-		drag.Frame.Position = UDim2.fromOffset(math.round(position.X), math.round(position.Y))
-		return
-	end
-	local maxX = math.max(0, root.AbsoluteSize.X / scale - drag.Frame.AbsoluteSize.X / scale)
-	local maxY = math.max(0, root.AbsoluteSize.Y / scale - drag.Frame.AbsoluteSize.Y / scale)
-	drag.Frame.Position = UDim2.fromOffset(
-		math.clamp(position.X, 0, maxX),
-		math.clamp(position.Y, 0, maxY)
-	)
+    local drag = FloatingInternals.ActiveDrag
+    if not drag or not drag.Draggable then return end
+    local mouse = drag.Input.UserInputType == Enum.UserInputType.MouseButton1
+    if (mouse and input.UserInputType ~= Enum.UserInputType.MouseMovement)
+        or (not mouse and input ~= drag.Input) then return end
+
+    local delta = Vector2.new(input.Position.X, input.Position.Y) - drag.Start
+    if delta.Magnitude < 6 and not drag.Moved then return end
+    drag.Moved = true
+
+    local view, scale = FloatingInternals.GetViewport()
+    local frame = drag.Frame
+    local rect = FloatingInternals.GetLogicalRect(frame, scale)
+    if not rect then return end
+    local raw = drag.Position + delta / scale
+    local maxX = math.max(FloatingInternals.Margin, view.X - rect.W - FloatingInternals.Margin)
+    local maxY = math.max(FloatingInternals.Margin, view.Y - rect.H - FloatingInternals.Margin)
+    local clampedX = math.clamp(raw.X, FloatingInternals.Margin, maxX)
+    local clampedY = math.clamp(raw.Y, FloatingInternals.Margin, maxY)
+    local beyond = math.abs(raw.X - clampedX) > 1 or math.abs(raw.Y - clampedY) > 1
+    if beyond and not drag.EdgeFeedback and drag.Widget then
+        drag.EdgeFeedback = true
+        FloatingInternals.Bounce(drag.Widget)
+    elseif not beyond then
+        drag.EdgeFeedback = false
+    end
+    frame.Position = UDim2.fromOffset(math.floor(clampedX + 0.5), math.floor(clampedY + 0.5))
 end))
+
 LibJanitor:Add(UserInputService.InputEnded:Connect(function(input)
-	local drag = FloatingInternals.ActiveDrag
-	if not drag then return end
-	local mouse = drag.Input.UserInputType == Enum.UserInputType.MouseButton1
-	if not (mouse and input.UserInputType == Enum.UserInputType.MouseButton1)
-		and not (not mouse and input == drag.Input) then return end
-	FloatingInternals.ActiveDrag = nil
-	if not drag.Moved and drag.Frame.Parent and drag.OnTap then drag.OnTap() end
+    local drag = FloatingInternals.ActiveDrag
+    if not drag then return end
+    local mouse = drag.Input.UserInputType == Enum.UserInputType.MouseButton1
+    if not (mouse and input.UserInputType == Enum.UserInputType.MouseButton1)
+        and not (not mouse and input == drag.Input) then return end
+    FloatingInternals.ActiveDrag = nil
+    if not drag.Moved and drag.Frame.Parent and drag.OnTap then
+        drag.OnTap()
+    elseif drag.Widget then
+        local rect = FloatingInternals.GetLogicalRect(drag.Frame, FloatingInternals.GetViewport())
+        if drag.Widget._FloatingAutoStack then
+            FloatingInternals.Reflow(true)
+        elseif rect then
+            FloatingInternals.ResolveCollision(drag.Widget, rect.X, rect.Y, true)
+        end
+    end
 end))
 
 function FloatingInternals.Scope(opts)
@@ -16662,6 +15926,9 @@ function SilentUI:_RefreshFloatingBindings()
 	end
 end
 
+-- CreateBubbleToggle({ Flag = "MyToggle", Icon = "shield", Color = Color3.fromRGB(...),
+--    Position = UDim2.fromOffset(30, 230), Size = 50, Draggable = true,
+--    AllowOffscreen = false }) -- default true for backward compatibility
 function SilentUI:CreateBubbleToggle(opts)
 	opts = opts or {}
 	local scope = FloatingInternals.Scope(opts)
@@ -16676,7 +15943,7 @@ function SilentUI:CreateBubbleToggle(opts)
 	bubble.BackgroundColor3 = state and color or inactive
 	bubble.BorderSizePixel = 0
 	bubble.Size = UDim2.fromOffset(size, size)
-	bubble.Position = typeof(opts.Position) == "UDim2" and opts.Position or UDim2.fromOffset(20, 190)
+	bubble.Position = typeof(opts.Position) == "UDim2" and opts.Position or UDim2.fromOffset(12, 12)
 	bubble.ZIndex = 500
 	bubble.Parent = self._Root
 	Corner(bubble, size / 2)
@@ -16768,26 +16035,38 @@ function SilentUI:CreateBubbleToggle(opts)
 		render()
 	end
 	function widget:SetImage(value) icon.Image = FloatingInternals.Image(value) end
-	function widget:SetVisible(visible) bubble.Visible = visible == true end
+	function widget:SetVisible(visible)
+		bubble.Visible = visible == true
+		FloatingInternals.Reflow(true)
+	end
 	function widget:SetPosition(position)
 		assert(typeof(position) == "UDim2", "SetPosition expects UDim2")
-		bubble.Position = position
+		if self._FloatingAutoStack then
+			bubble.Position = position
+			FloatingInternals.Reflow(true)
+		else
+			FloatingInternals.ResolveCollision(self, position.X.Offset, position.Y.Offset, true)
+		end
 	end
 	function widget:OnChanged(callback) return signal.Connect(callback) end
 	function widget:Destroy()
 		if self._Destroyed then return end
 		self._Destroyed = true
 		FloatingInternals.Registry[self] = nil
+		FloatingInternals.ByFrame[bubble] = nil
 		if sourceConnection then sourceConnection:Disconnect(); sourceConnection = nil end
 		scope:Destroy()
+		task.defer(function() FloatingInternals.Reflow(true) end)
 	end
 	scope:Add(function()
 		widget._Destroyed = true
 		FloatingInternals.Registry[widget] = nil
+		FloatingInternals.ByFrame[bubble] = nil
 		if sourceConnection then sourceConnection:Disconnect(); sourceConnection = nil end
 	end)
-	FloatingInternals.RegisterDrag(bubble, bubble, function() widget:Set(not state) end, opts.Draggable, scope, opts.AllowOffscreen ~= false)
-	FloatingInternals.Registry[widget] = true
+	FloatingInternals.Register(widget, opts, scope)
+	FloatingInternals.RegisterDrag(bubble, bubble, function() widget:Set(not state) end,
+		opts.Draggable, scope, false, widget)
 	scope:Add(SilentUI:OnConfigLoaded(function() widget:Refresh() end))
 	widget:Refresh()
 	return widget
@@ -16800,13 +16079,18 @@ function Window:CreateBubbleToggle(opts)
 	return SilentUI:CreateBubbleToggle(config)
 end
 
+
+
+-- Detachable, event-driven state/keybind list. Never polls on Heartbeat.
 function SilentUI:CreateStateList(opts)
 	opts = opts or {}
 	local scope = FloatingInternals.Scope(opts)
 	local background = FloatingInternals.Color(opts.Color, self.Theme.Background)
 	local activeColor = FloatingInternals.Color(opts.ActiveColor, self.Theme.Accent)
 	local inactiveColor = FloatingInternals.Color(opts.InactiveColor, self.Theme.TextDim)
-	local width = math.clamp(tonumber(opts.Width) or 190, 120, 450)
+	local viewport, globalScale = FloatingInternals.GetViewport()
+	local maxWidth = math.max(112, math.min(360, viewport.X - FloatingInternals.Margin * 2))
+	local width = math.clamp(tonumber(opts.Width) or 190, math.min(112, maxWidth), maxWidth)
 	local panel = Instance.new("Frame")
 	panel.Name = opts.Name or "SilentStateList"
 	panel.BackgroundColor3 = background
@@ -16814,7 +16098,7 @@ function SilentUI:CreateStateList(opts)
 	panel.BorderSizePixel = 0
 	panel.AutomaticSize = Enum.AutomaticSize.Y
 	panel.Size = UDim2.fromOffset(width, 0)
-	panel.Position = typeof(opts.Position) == "UDim2" and opts.Position or UDim2.fromOffset(20, 270)
+	panel.Position = typeof(opts.Position) == "UDim2" and opts.Position or UDim2.fromOffset(12, 12)
 	panel.ZIndex = 501
 	panel.Parent = self._Root
 	Corner(panel, tonumber(opts.CornerRadius) or 10)
@@ -16947,6 +16231,7 @@ function SilentUI:CreateStateList(opts)
 		}
 		items[key] = entry
 		refreshEntry(entry)
+		task.defer(function() FloatingInternals.Reflow(false) end)
 		return key
 	end
 	function list:RemoveItem(key)
@@ -16955,6 +16240,7 @@ function SilentUI:CreateStateList(opts)
 		items[tostring(key)] = nil
 		if entry.Connection then entry.Connection:Disconnect() end
 		entry.Row:Destroy()
+		task.defer(function() FloatingInternals.Reflow(false) end)
 		return true
 	end
 	function list:SetItemState(key, value)
@@ -16980,10 +16266,18 @@ function SilentUI:CreateStateList(opts)
 		inactiveColor = value
 		self:Refresh()
 	end
-	function list:SetVisible(value) panel.Visible = value == true end
+	function list:SetVisible(value)
+		panel.Visible = value == true
+		FloatingInternals.Reflow(true)
+	end
 	function list:SetPosition(position)
 		assert(typeof(position) == "UDim2", "SetPosition expects UDim2")
-		panel.Position = position
+		if self._FloatingAutoStack then
+			panel.Position = position
+			FloatingInternals.Reflow(true)
+		else
+			FloatingInternals.ResolveCollision(self, position.X.Offset, position.Y.Offset, true)
+		end
 	end
 	function list:Refresh()
 		if self._Destroyed then return end
@@ -16993,29 +16287,33 @@ function SilentUI:CreateStateList(opts)
 		if self._Destroyed then return end
 		self._Destroyed = true
 		FloatingInternals.Registry[self] = nil
+		FloatingInternals.ByFrame[panel] = nil
 		for _, entry in pairs(items) do
 			if entry.Connection then entry.Connection:Disconnect() end
 		end
 		table.clear(items)
 		scope:Destroy()
+		task.defer(function() FloatingInternals.Reflow(true) end)
 	end
 	scope:Add(function()
 		list._Destroyed = true
 		FloatingInternals.Registry[list] = nil
+		FloatingInternals.ByFrame[panel] = nil
 		for _, entry in pairs(items) do
 			if entry.Connection then entry.Connection:Disconnect() end
 		end
 		table.clear(items)
 	end)
 	local collapsed = false
+	FloatingInternals.Register(list, opts, scope)
 	FloatingInternals.RegisterDrag(header, panel, function()
 		if opts.Collapsible then
 			collapsed = not collapsed
 			for _, entry in pairs(items) do entry.Row.Visible = not collapsed end
+			task.defer(function() FloatingInternals.Reflow(true) end)
 		end
-	end, opts.Draggable, scope)
+	end, opts.Draggable, scope, false, list)
 	for _, info in ipairs(opts.Items or {}) do list:AddItem(info) end
-	FloatingInternals.Registry[list] = true
 	scope:Add(SilentUI:OnConfigLoaded(function() list:Refresh() end))
 	return list
 end
@@ -17030,6 +16328,7 @@ end
 SilentUI.CreateKeybindList = SilentUI.CreateStateList
 Window.CreateKeybindList = Window.CreateStateList
 
+-- Public declarative adapter, keeping all existing Add* methods intact.
 function Tab:AddControl(opts)
 	assert(type(opts) == "table", "AddControl expects a definition table")
 	local normalized = table.clone(opts)
