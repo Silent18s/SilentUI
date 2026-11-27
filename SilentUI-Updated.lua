@@ -29,11 +29,10 @@ SilentUI._Windows = {}
     SILENTUI
     Change these values before distributing the library.
     Background.Image accepts an asset ID, rbxassetid:// reference or HTTPS image URL.
-    Leave Discord Invite / Replacement empty to use the built-in SilentUI invitations.
+    Leave Discord.Invite empty to use the built-in SilentUI invitation.
 ]]
 
 SilentUI.DefaultDiscordInvite = "https://discord.gg/k3SVsV7sXs"
-SilentUI.DefaultDiscordReplacement = "https://discord.gg/HnGeFAXmdH"
 SilentUI.Defaults = {
     Title = "SilentUI",
     Subtitle = "Community UI Library",
@@ -45,7 +44,6 @@ SilentUI.Defaults = {
     },
     Discord = {
         Invite = "",
-        Replacement = "",
     },
 }
  
@@ -4486,71 +4484,105 @@ end
 
 function Window:AddDiscordPanel(opts)
     opts = opts or {}
+    local discordDefaults = SilentUI.Defaults.Discord or {}
+    local invite = tostring(opts.Invite or discordDefaults.Invite or "")
+    if invite == "" then invite = SilentUI.DefaultDiscordInvite end
 
     local tabObj = self:AddTab({
         Name = opts.Name or "Discord",
         Icon = opts.Icon or "messages-square",
-        Hidden = opts.Hidden == true,
+        Hidden = true,
     })
-
-    local discordDefaults = SilentUI.Defaults.Discord or {}
-    local invite = tostring(opts.Invite or discordDefaults.Invite or "")
-    local replacement = tostring(opts.Replacement or discordDefaults.Replacement or "")
-    if invite == "" then invite = SilentUI.DefaultDiscordInvite end
-    if replacement == "" then replacement = SilentUI.DefaultDiscordReplacement end
-
     tabObj:AddParagraph({
         Title = opts.Title or "Discord",
         Icon = "messages-square",
-        Text = opts.Description or "Abre las invitaciones configuradas para la comunidad.",
+        Text = opts.Description or "Comunidad y soporte de SilentUI.",
     })
-
-    local function addInviteButton(title, description, url)
-        return tabObj:AddButton({
-            Text = title,
-            Description = description,
-            Icon = "external-link",
-            Callback = function()
-                local opened = Private.OpenExternalURL(url)
-                if opened then
-                    SilentUI:Notify({
-                        Title = "Discord",
-                        Text = title .. " abierta en el navegador.",
-                        Type = "success",
-                        Duration = 5,
-                    })
-                    return
-                end
-
-                local copied = Private.CopyToClipboard(url)
+    local inviteButton = tabObj:AddButton({
+        Text = opts.ButtonText or "Abrir Discord",
+        Description = "Abre la invitación configurada para este panel.",
+        Icon = "external-link",
+        Callback = function()
+            local opened = Private.OpenExternalURL(invite)
+            if opened then
+                SilentUI:Notify({ Title = "Discord", Text = "Invitación abierta.", Type = "success", Duration = 5 })
+            else
+                local copied = Private.CopyToClipboard(invite)
                 SilentUI:Notify({
                     Title = "Discord",
-                    Text = copied
-                        and "Este executor no pudo abrir el enlace; se copió al portapapeles."
-                        or ("No hay abridor externo ni portapapeles compatible. Enlace: " .. url),
+                    Text = copied and "No se pudo abrir; enlace copiado." or ("No se pudo abrir el enlace: " .. invite),
                     Type = copied and "info" or "warning",
-                    Duration = 9,
+                    Duration = 8,
                 })
-            end,
-        })
-    end
-
-    local firstInvite = addInviteButton(
-        "Invitacion:",
-        "Abrir la invitación principal de Discord.",
-        invite
-    )
-    local secondInvite = addInviteButton(
-        "Repuesto:",
-        "Abrir la invitación de reemplazo.",
-        replacement
-    )
-
+            end
+        end,
+    })
+    local dock = self:AddDockButton({
+        Name = "DiscordDockButton",
+        Icon = opts.Icon or "messages-square",
+        Callback = function() tabObj._select() end,
+    })
     return {
         Instance = tabObj._group,
         Tab = tabObj,
-        Invites = { firstInvite, secondInvite },
-        Destroy = function() tabObj._group:Destroy() end,
+        DockButton = dock,
+        Invite = inviteButton,
+        URL = invite,
+        Destroy = function()
+            if dock and dock.Instance then dock.Instance:Destroy() end
+            if tabObj._group then tabObj._group:Destroy() end
+        end,
+    }
+end
+
+function Window:AddUserSettingsPanel(opts)
+    opts = opts or {}
+    local tabObj = self:AddTab({
+        Name = opts.Name or "Panel Settings",
+        Icon = opts.Icon or "settings",
+        Hidden = true,
+    })
+    tabObj:AddParagraph({
+        Title = opts.Title or "Panel Settings",
+        Icon = "settings",
+        Text = opts.Description or "Personaliza el comportamiento de la interfaz.",
+    })
+    tabObj:AddToggle({
+        Text = "Background blur",
+        Default = SilentUI.Config.Blur ~= false,
+        Callback = function(value) SilentUI:SetBlurEnabled(value) end,
+    })
+    tabObj:AddDropdown({
+        Text = "Language",
+        Options = { "English", "Español" },
+        Default = SilentUI:GetLanguage() == "es" and "Español" or "English",
+        Callback = function(value)
+            SilentUI:SetLanguage(value == "Español" and "es" or "en")
+        end,
+    })
+    tabObj:AddButton({
+        Text = "Toggle fullscreen",
+        Icon = "maximize",
+        Callback = function() self:ToggleFullscreen() end,
+    })
+    tabObj:AddButton({
+        Text = "Close panel",
+        Icon = "x",
+        Callback = function() self:Close() end,
+    })
+    local dock = self:AddDockButton({
+        Name = "PanelSettingsDockButton",
+        Icon = opts.Icon or "settings",
+        Callback = function() tabObj._select() end,
+    })
+    return {
+        Instance = tabObj._group,
+        Tab = tabObj,
+        DockButton = dock,
+        Destroy = function()
+            if dock and dock.Instance then dock.Instance:Destroy() end
+            if tabObj._group then tabObj._group:Destroy() end
+        end,
     }
 end
 
@@ -15646,7 +15678,7 @@ function FloatingInternals.SetPosition(widget, x, y, animate)
     if not frame or not frame.Parent then return end
     local target = UDim2.fromOffset(math.floor(x + 0.5), math.floor(y + 0.5))
     if animate then
-        Tween(frame, { Position = target }, 0.24, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+        Tween(frame, { Position = target }, 0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
     else
         frame.Position = target
     end
@@ -15725,15 +15757,22 @@ function FloatingInternals.ResolveCollision(widget, requestedX, requestedY, anim
             x = collision.X + collision.W + gap
         end
         if x + own.W > view.X - margin then
-            -- No free manual slot remains. Join the managed vertical stack instead of overlapping.
-            widget._FloatingAutoStack = true
-            FloatingInternals.Reflow(true)
-            return false
+            -- Try a clean vertical slot at the left edge. Never restore the old
+            -- position: keep the drag result and place it in the next free slot.
+            x = margin
+            y = collision.Y + collision.H + gap
+            if y + own.H > view.Y - margin then
+                y = margin
+                x = collision.X + collision.W + gap
+            end
+            if x + own.W > view.X - margin or y + own.H > view.Y - margin then
+                FloatingInternals.Bounce(widget)
+                return false
+            end
         end
     end
 
-    widget._FloatingAutoStack = true
-    FloatingInternals.Reflow(true)
+    FloatingInternals.Bounce(widget)
     return false
 end
 
@@ -15843,6 +15882,11 @@ function FloatingInternals.RegisterDrag(handle, frame, onTap, draggable, scope, 
         local view, scale = FloatingInternals.GetViewport()
         local root = SilentUI._Root
         local pos = (frame.AbsolutePosition - root.AbsolutePosition) / scale
+        if widget then
+            -- AutoStack only controls the initial placement. Once dragged, the
+            -- widget keeps its user-selected position and is no longer reflowed.
+            widget._FloatingAutoStack = false
+        end
         FloatingInternals.ActiveDrag = {
             Input = input,
             Frame = frame,
@@ -15902,7 +15946,8 @@ LibJanitor:Add(UserInputService.InputEnded:Connect(function(input)
     if not drag.Moved and drag.Frame.Parent and drag.OnTap then
         drag.OnTap()
     elseif drag.Widget then
-        local rect = FloatingInternals.GetLogicalRect(drag.Frame, FloatingInternals.GetViewport())
+        local _, finalScale = FloatingInternals.GetViewport()
+        local rect = FloatingInternals.GetLogicalRect(drag.Frame, finalScale)
         if drag.Widget._FloatingAutoStack then
             FloatingInternals.Reflow(true)
         elseif rect then
