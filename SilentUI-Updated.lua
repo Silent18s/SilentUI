@@ -16,15 +16,6 @@ local IsMobileDevice = UserInputService.TouchEnabled and not UserInputService.Mo
  
 local SilentUI = {}
 local Private = {}
-SilentUI._FloatingWidgets = {}
-SilentUI._StateLists = {}
-SilentUI.UserSettings = {
-    ShowFloatingWidgets = true,
-    ShowStatePanels = true,
-    ShowStateValues = true,
-    LockStatePanels = false,
-    StatePanelsPassThrough = false,
-}
 SilentUI.__index = SilentUI
 SilentUI.Version = "2.13.2"
 SilentUI.Flags = {}
@@ -1284,10 +1275,20 @@ Private.IconSources = {
  
 Private.IconCache = {}
 Private.IconLoading = {}
+Private.IconFailureAt = {}
+Private.ICON_RETRY_DELAY = 20
  
 local function LoadIconSource(source)
-	if Private.IconCache[source] ~= nil then
-		return Private.IconCache[source] or nil
+	local cached = Private.IconCache[source]
+	if cached ~= nil and cached ~= false then
+		return cached
+	end
+	if cached == false then
+		local failedAt = Private.IconFailureAt[source] or 0
+		if os.clock() - failedAt < Private.ICON_RETRY_DELAY then
+			return nil
+		end
+		Private.IconCache[source] = nil
 	end
  
 	if Private.IconLoading[source] then
@@ -1390,13 +1391,8 @@ function Private.GetRoot()
 	screenGui:SetAttribute("SilentLanguage", SilentUI.Language)
 	screenGui.AutoLocalize = false
 	screenGui.ResetOnSpawn = false
-	-- Cover the full viewport (including the topbar/safe-inset margins).
-	screenGui.IgnoreGuiInset = true
-	pcall(function() screenGui.ScreenInsets = Enum.ScreenInsets.None end)
-	pcall(function() screenGui.ClipToDeviceSafeArea = false end)
-	-- Keep SilentUI above normal PlayerGui ScreenGuis.
-	-- Maximum signed 32-bit DisplayOrder; this places SilentUI above other ScreenGuis.
-screenGui.DisplayOrder = 2147483647
+	screenGui.IgnoreGuiInset = false
+	screenGui.DisplayOrder = 9999
 	screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 	screenGui.Parent = parent
 	Private.TrackLocalizationRoot(screenGui)
@@ -3037,19 +3033,44 @@ function SilentUI:CreateWindow(opts)
 	main.ZIndex = Z.Window
 	main.Parent = root
 	Corner(main, SilentUI.Theme.CornerRadius)
-	Stroke(main, SilentUI.Theme.Border, 1, 0.92)
+
+	local windowBorder = Instance.new("Frame")
+	windowBorder.Name = "WindowBorderOverlay"
+	windowBorder.BackgroundTransparency = 1
+	windowBorder.BorderSizePixel = 0
+	windowBorder.AnchorPoint = main.AnchorPoint
+	windowBorder.Position = main.Position
+	windowBorder.Size = main.Size
+	windowBorder.ClipsDescendants = false
+	windowBorder.Active = false
+	windowBorder.Selectable = false
+	windowBorder.ZIndex = Z.Content + 24
+	windowBorder.Parent = root
+	Corner(windowBorder, SilentUI.Theme.CornerRadius)
+	local windowBorderStroke = Stroke(windowBorder, SilentUI.Theme.Border, 1, 0.92)
+	jan:Add(windowBorder)
+
 	Private.GlassLayer(main, SilentUI.Theme.CornerRadius, 0.985)
 	local windowAnimationScale = Instance.new("UIScale")
 	windowAnimationScale.Name = "SilentWindowAnimationScale"
 	windowAnimationScale.Scale = 1
 	windowAnimationScale.Parent = main
 
+	local windowBorderScale = Instance.new("UIScale")
+	windowBorderScale.Name = "SilentWindowBorderScale"
+	windowBorderScale.Scale = 1
+	windowBorderScale.Parent = windowBorder
+	jan:Add(windowBorderScale)
+	jan:Add(windowAnimationScale:GetPropertyChangedSignal("Scale"):Connect(function()
+		windowBorderScale.Scale = windowAnimationScale.Scale
+	end))
+
 	Private.NextWindowId += 1
 	local windowId = Private.NextWindowId
 	main:SetAttribute("SilentWindowId", windowId)
 	main:SetAttribute("SilentThemeImageColorExempt", true)
 
-	local function syncShadow()
+	local function syncWindowLayers()
 		shadow.AnchorPoint = main.AnchorPoint
 		shadow.Position = main.Position
 		shadow.Size = UDim2.new(
@@ -3057,12 +3078,16 @@ function SilentUI:CreateWindow(opts)
 			main.Size.Y.Scale, main.Size.Y.Offset + 75
 		)
 		shadow.Visible = main.Visible
+		windowBorder.AnchorPoint = main.AnchorPoint
+		windowBorder.Position = main.Position
+		windowBorder.Size = main.Size
+		windowBorder.Visible = main.Visible
 	end
-	syncShadow()
-	jan:Add(main:GetPropertyChangedSignal("Position"):Connect(syncShadow))
-	jan:Add(main:GetPropertyChangedSignal("Size"):Connect(syncShadow))
-	jan:Add(main:GetPropertyChangedSignal("AnchorPoint"):Connect(syncShadow))
-	jan:Add(main:GetPropertyChangedSignal("Visible"):Connect(syncShadow))
+	syncWindowLayers()
+	jan:Add(main:GetPropertyChangedSignal("Position"):Connect(syncWindowLayers))
+	jan:Add(main:GetPropertyChangedSignal("Size"):Connect(syncWindowLayers))
+	jan:Add(main:GetPropertyChangedSignal("AnchorPoint"):Connect(syncWindowLayers))
+	jan:Add(main:GetPropertyChangedSignal("Visible"):Connect(syncWindowLayers))
  
 	local topbar = Instance.new("Frame")
 	topbar.Name = "TopBar"
@@ -3276,6 +3301,8 @@ function SilentUI:CreateWindow(opts)
 		_backgroundImageTransparency = math.clamp(tonumber(opts.BackgroundImageTransparency) or 0.22, 0, 1),
 		_animationScale = windowAnimationScale,
 		_shadow         = shadow,
+		_borderFrame    = windowBorder,
+		_borderStroke   = windowBorderStroke,
 		_content        = content,
 		_tabBar         = tabBar,
 		_tabIndicatorLayer = tabIndicatorLayer,
@@ -3671,14 +3698,6 @@ function SilentUI:CreateWindow(opts)
 			end
 		end)
 	end
-
-    -- SilentUI's shortcuts are created automatically and stay isolated from
-    -- AddDockButton calls made by scripts using the library.
-    if opts.LibraryDock ~= false then
-        self:AddSpotifyPanel(opts.Spotify or SilentUI.Defaults.Spotify or {})
-        self:AddUserSettingsPanel(opts.UserSettings or SilentUI.Defaults.UserSettings or {})
-        self:AddDiscordDockButton()
-    end
 	return self
 end
 
@@ -3923,6 +3942,9 @@ function Window:Destroy()
 	if self._shadow then
 		Tween(self._shadow, { ImageTransparency = 1 }, 0.3, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
 	end
+	if self._borderStroke then
+		Tween(self._borderStroke, { Transparency = 1 }, 0.3, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
+	end
  
 	task.delay(0.34, function()
 		self._janitor:Destroy()
@@ -3961,6 +3983,9 @@ function Window:Close()
 	if self._shadow then
 		Tween(self._shadow, { ImageTransparency = 1 }, 0.24, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
 	end
+	if self._borderStroke then
+		Tween(self._borderStroke, { Transparency = 1 }, 0.22, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
+	end
 
 	task.delay(0.27, function()
 		if self._destroyed then return end
@@ -3996,6 +4021,11 @@ function Window:Open()
 		self._shadow.Visible = true
 		self._shadow.ImageTransparency = 1
 		Tween(self._shadow, { ImageTransparency = 0 }, 0.32, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+	end
+	if self._borderFrame then self._borderFrame.Visible = true end
+	if self._borderStroke then
+		self._borderStroke.Transparency = 1
+		Tween(self._borderStroke, { Transparency = 0.92 }, 0.32, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
 	end
 	if self._backgroundImage and self._backgroundImage.Image ~= "" then
 		self._backgroundImage.ImageTransparency = 1
@@ -4065,171 +4095,279 @@ end
 Private.DOCK_ICON_SIZE = 28
 Private.DOCK_HEIGHT    = 34
  
-local function EnsureDockLayoutSpace(window)
-    if window._dockLayoutApplied then return end
+-- Floating internals are defined later in the file, but user settings can reference them.
+local FloatingInternals
+
+Private.DOCK_ICON_SIZE = 28
+Private.DOCK_HEIGHT = 34
+Private.DOCK_WIDTH = 130
+Private.DOCK_GAP = 4
+Private.DockHosts = setmetatable({}, { __mode = "k" })
+Private.DockCallbacks = setmetatable({}, { __mode = "k" })
+
+local SYSTEM_DOCK_KEYS = {
+    Spotify = true,
+    Configuration = true,
+    Discord = true,
+}
+
+local function SyncDockSpace(window, state)
+    if not window._tabBar or not window._tabIndicatorLayer then return end
+    local rows = (state.Rows.Developer and 1 or 0) + (state.Rows.System and 1 or 0)
+    local reserved = rows > 0 and (rows * Private.DOCK_HEIGHT + math.max(0, rows - 1) * Private.DOCK_GAP) or 0
     local margin = SilentUI.Theme.Margin
-    local shrunkSize = UDim2.new(0, 130, 1, -(58 + margin + Private.DOCK_HEIGHT + 10))
-    window._tabBar.Size = shrunkSize
-    window._tabIndicatorLayer.Size = shrunkSize
-    window._dockLayoutApplied = true
+    local bottomOffset = 58 + margin + reserved + 10
+    local size = UDim2.new(0, Private.DOCK_WIDTH, 1, -bottomOffset)
+    window._tabBar.Size = size
+    window._tabIndicatorLayer.Size = size
 end
 
-local function CreateDockContainer(window, owner)
-    local libraryOwned = owner == "library"
-    local field = libraryOwned and "_libraryDock" or "_developerDock"
-    if window[field] then return window[field] end
+local function EnsureDockHost(window)
+    local state = Private.DockHosts[window]
+    if state and state.Host and state.Host.Parent then return state end
 
-    EnsureDockLayoutSpace(window)
+    state = {
+        Host = nil,
+        Rows = {},
+        Buttons = { Developer = {}, System = {} },
+        NextLayoutOrder = { Developer = 0, System = 0 },
+        SystemKeys = {},
+    }
 
-    local dock
-    if libraryOwned then
-        dock = Instance.new("Frame")
-        dock.Name = "SilentUILibraryDock"
-        dock.AnchorPoint = Vector2.new(0, 1)
-        dock.Position = UDim2.new(0, SilentUI.Theme.Margin, 1, -SilentUI.Theme.Margin)
-        dock.Size = UDim2.fromOffset(108, Private.DOCK_HEIGHT)
+    local host = Instance.new("Frame")
+    host.Name = "SilentDockHost"
+    host.BackgroundTransparency = 1
+    host.BorderSizePixel = 0
+    host.AnchorPoint = Vector2.new(0, 1)
+    host.Position = UDim2.new(0, SilentUI.Theme.Margin, 1, -SilentUI.Theme.Margin)
+    host.Size = UDim2.fromOffset(Private.DOCK_WIDTH, 0)
+    host.AutomaticSize = Enum.AutomaticSize.Y
+    host.ZIndex = Z.Content
+    host.Parent = window._gui
+
+    local layout = Instance.new("UIListLayout")
+    layout.FillDirection = Enum.FillDirection.Vertical
+    layout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+    layout.VerticalAlignment = Enum.VerticalAlignment.Bottom
+    layout.Padding = UDim.new(0, Private.DOCK_GAP)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Parent = host
+
+    state.Host = host
+    state.Layout = layout
+    Private.DockHosts[window] = state
+    window._dockHost = host
+    window._dockState = state
+    window._janitor:Add(host)
+    window._janitor:Add(host:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+        SyncDockSpace(window, state)
+    end))
+    SyncDockSpace(window, state)
+    return state
+end
+
+local function EnsureDockRow(window, kind)
+    local state = EnsureDockHost(window)
+    local existing = state.Rows[kind]
+    if existing and existing.Parent then return existing end
+
+    local row = Instance.new("ScrollingFrame")
+    row.Name = kind == "System" and "SilentSystemDock" or "DeveloperDock"
+    row.BackgroundTransparency = 1
+    row.BorderSizePixel = 0
+    row.Active = true
+    row.Size = UDim2.fromOffset(Private.DOCK_WIDTH, Private.DOCK_HEIGHT)
+    row.CanvasSize = UDim2.new()
+    row.AutomaticCanvasSize = Enum.AutomaticSize.X
+    row.ScrollingDirection = Enum.ScrollingDirection.X
+    row.ScrollBarThickness = 0
+    row.ElasticBehavior = Enum.ElasticBehavior.WhenScrollable
+    row.LayoutOrder = kind == "Developer" and 1 or 2
+    row.ZIndex = Z.Content
+    row.Parent = state.Host
+
+    local rowLayout = Instance.new("UIListLayout")
+    rowLayout.FillDirection = Enum.FillDirection.Horizontal
+    rowLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+    rowLayout.Padding = UDim.new(0, 6)
+    rowLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    rowLayout.Parent = row
+
+    state.Rows[kind] = row
+    if kind == "Developer" then
+        -- Compatibility alias: legacy code inspecting window._dock sees only the public dock.
+        window._dock = row
     else
-        dock = Instance.new("ScrollingFrame")
-        dock.Name = "ScriptDeveloperDock"
-        dock.AnchorPoint = Vector2.new(1, 1)
-        dock.Position = UDim2.new(1, -SilentUI.Theme.Margin, 1, -SilentUI.Theme.Margin)
-        dock.Size = UDim2.new(0.42, 0, 0, Private.DOCK_HEIGHT)
-        dock.CanvasSize = UDim2.new(0, 0, 0, 0)
-        dock.AutomaticCanvasSize = Enum.AutomaticSize.X
-        dock.ScrollingDirection = Enum.ScrollingDirection.X
-        dock.ScrollBarThickness = 0
-        dock.ElasticBehavior = Enum.ElasticBehavior.WhenScrollable
-        dock.ClipsDescendants = true
+        window._systemDock = row
     end
-
-    dock.BackgroundTransparency = 1
-    dock.BorderSizePixel = 0
-    dock.ZIndex = Z.Content
-    dock.Parent = window._gui
-
-    local dockLayout = Instance.new("UIListLayout")
-    dockLayout.FillDirection = Enum.FillDirection.Horizontal
-    dockLayout.Padding = UDim.new(0, 6)
-    dockLayout.SortOrder = Enum.SortOrder.LayoutOrder
-    dockLayout.VerticalAlignment = Enum.VerticalAlignment.Center
-    dockLayout.Parent = dock
-
-    window[field] = dock
-    if libraryOwned then
-        -- Compatibility alias for older internal code.
-        window._dock = dock
-    end
-    return dock
+    window._janitor:Add(row)
+    window._janitor:Add(rowLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        SyncDockSpace(window, state)
+    end))
+    SyncDockSpace(window, state)
+    return row
 end
 
-function Window:AddDockButton(opts)
+local function CreateDockButton(window, kind, opts)
     opts = opts or {}
-    local jan = self._janitor
-    local owner = string.lower(tostring(opts.Owner or opts.Group or "script"))
-    local libraryOwned = owner == "library" or owner == "silentui"
-    local dock = CreateDockContainer(self, libraryOwned and "library" or "script")
-
-    self._dockButtonSerial = (self._dockButtonSerial or 0) + 1
-    local order = tonumber(opts.Order) or self._dockButtonSerial
+    local state = EnsureDockHost(window)
+    local row = EnsureDockRow(window, kind)
 
     local btn = Instance.new("TextButton")
-    btn.Name = opts.Name or (libraryOwned and "SilentUIDockButton" or "ScriptDockButton")
-    local fallbackGlyph = tostring(opts.FallbackText or "")
-    btn.Text = fallbackGlyph
-    btn.TextTransparency = 0
+    btn.Name = opts.Name or (kind .. "DockButton")
+    btn.Text = ""
     btn.AutoButtonColor = false
-    btn.BackgroundColor3 = typeof(opts.BackgroundColor3) == "Color3"
-        and opts.BackgroundColor3 or SilentUI.Theme.Surface
-    btn.BackgroundTransparency = math.clamp(tonumber(opts.BackgroundTransparency) or 0.95, 0, 1)
+    btn.BackgroundColor3 = SilentUI.Theme.Surface
+    btn.BackgroundTransparency = 0.95
     btn.BorderSizePixel = 0
     btn.Size = UDim2.fromOffset(Private.DOCK_ICON_SIZE, Private.DOCK_ICON_SIZE)
-    btn.LayoutOrder = order
+    if opts.LayoutOrder ~= nil then
+        btn.LayoutOrder = tonumber(opts.LayoutOrder) or 0
+    else
+        state.NextLayoutOrder[kind] += 1
+        btn.LayoutOrder = state.NextLayoutOrder[kind]
+    end
     btn.ZIndex = Z.Content + 1
-    btn.Font = Enum.Font.GothamBold
-    btn.TextSize = 16
-    btn.TextColor3 = typeof(opts.FallbackTextColor3) == "Color3"
-        and opts.FallbackTextColor3 or SilentUI.Theme.Text
-    btn.Parent = dock
+    btn.Parent = row
     Corner(btn, 8)
 
-    local icon = Instance.new("ImageLabel")
-    icon.Name = "Icon"
-    icon.BackgroundTransparency = 1
-    local hasCustomImage = type(opts.Image) == "string" and opts.Image ~= ""
-    local iconSource = opts.Icon
-    local resolvedImage = hasCustomImage and opts.Image
-        or (iconSource and ResolveIcon(iconSource) or "")
-    icon.Image = resolvedImage
-    icon.ImageColor3 = typeof(opts.IconColor3) == "Color3"
-        and opts.IconColor3 or (hasCustomImage and Color3.new(1, 1, 1) or SilentUI.Theme.TextDim)
-    icon.Size = UDim2.fromOffset(17, 17)
-    icon.AnchorPoint = Vector2.new(0.5, 0.5)
-    icon.Position = UDim2.fromScale(0.5, 0.5)
-    icon.ZIndex = btn.ZIndex + 1
-    icon.Visible = resolvedImage ~= ""
-    icon.Parent = btn
-    if hasCustomImage then icon:SetAttribute("SilentThemeColorExempt", true) end
+    local customImage = type(opts.Image) == "string" and opts.Image ~= ""
+    local iconImage = customImage and opts.Image or (opts.Icon and ResolveIcon(opts.Icon) or "")
+    local image = Instance.new("ImageLabel")
+    image.Name = "Icon"
+    image.BackgroundTransparency = 1
+    image.Image = type(iconImage) == "string" and iconImage or ""
+    image.ImageTransparency = image.Image ~= "" and 0 or 1
+    image.ImageColor3 = customImage and Color3.new(1, 1, 1) or SilentUI.Theme.TextDim
+    image.AnchorPoint = Vector2.new(0.5, 0.5)
+    image.Position = UDim2.fromScale(0.5, 0.5)
+    image.Size = UDim2.fromOffset(17, 17)
+    image.ScaleType = Enum.ScaleType.Fit
+    image.ZIndex = btn.ZIndex + 1
+    image.Parent = btn
+    if customImage then image:SetAttribute("SilentThemeColorExempt", true) end
 
-    -- Some executors cannot load a valid Roblox image asset. Keep a text
-    -- fallback ready, and only remove it when IsLoaded confirms the icon loaded.
-    if icon.Image == "" then
-        btn.Text = fallbackGlyph
-        icon.Visible = false
-    elseif fallbackGlyph ~= "" then
-        task.spawn(function()
-            local deadline = os.clock() + 5
-            while icon.Parent and btn.Parent and os.clock() < deadline do
-                local ok, loaded = pcall(function() return icon.IsLoaded end)
-                if ok and loaded == true then
-                    btn.Text = ""
-                    return
-                end
-                task.wait(0.15)
-            end
-            if not icon.Parent or not btn.Parent then return end
-            local ok, loaded = pcall(function() return icon.IsLoaded end)
-            if not ok or loaded ~= true then
-                icon.Visible = false
-                btn.Text = fallbackGlyph
-            else
-                btn.Text = ""
+    local fallback = Instance.new("TextLabel")
+    fallback.Name = "IconFallback"
+    fallback.BackgroundTransparency = 1
+    fallback.Text = tostring(opts.FallbackGlyph or (kind == "System" and "•" or "●"))
+    fallback.FontFace = SilentUI.Theme.Font
+    fallback.TextSize = 18
+    fallback.TextColor3 = SilentUI.Theme.Text
+    fallback.TextXAlignment = Enum.TextXAlignment.Center
+    fallback.TextYAlignment = Enum.TextYAlignment.Center
+    fallback.AnchorPoint = Vector2.new(0.5, 0.5)
+    fallback.Position = UDim2.fromScale(0.5, 0.5)
+    fallback.Size = UDim2.fromScale(1, 1)
+    fallback.ZIndex = image.ZIndex + 1
+    fallback.Visible = image.Image == "" or not image.IsLoaded
+    fallback.Parent = btn
+
+    if image.Image ~= "" then
+        task.delay(5, function()
+            if image.Parent and fallback.Parent and not image.IsLoaded then
+                image.Visible = false
+                fallback.Visible = true
             end
         end)
+        window._janitor:Add(image:GetPropertyChangedSignal("IsLoaded"):Connect(function()
+            if not image.Parent or not fallback.Parent then return end
+            if image.IsLoaded then
+                image.Visible = true
+                fallback.Visible = false
+            end
+        end))
     end
 
     local active = false
-    local normalTransparency = btn.BackgroundTransparency
-    local activeTransparency = math.min(normalTransparency, 0.78)
-
-    jan:Add(btn.MouseEnter:Connect(function()
+    local callback = opts.Callback
+    window._janitor:Add(btn.MouseEnter:Connect(function()
         if active then return end
-        Tween(btn, { BackgroundTransparency = math.min(normalTransparency, 0.84) }, 0.12)
-        if not hasCustomImage then Tween(icon, { ImageColor3 = SilentUI.Theme.Text }, 0.12) end
+        Tween(btn, { BackgroundTransparency = 0.85 }, 0.12)
+        if not customImage and image.Visible then Tween(image, { ImageColor3 = SilentUI.Theme.Text }, 0.12) end
     end))
-    jan:Add(btn.MouseLeave:Connect(function()
+    window._janitor:Add(btn.MouseLeave:Connect(function()
         if active then return end
-        Tween(btn, { BackgroundTransparency = normalTransparency }, 0.12)
-        if not hasCustomImage then Tween(icon, { ImageColor3 = SilentUI.Theme.TextDim }, 0.12) end
+        Tween(btn, { BackgroundTransparency = 0.95 }, 0.12)
+        if not customImage and image.Visible then Tween(image, { ImageColor3 = SilentUI.Theme.TextDim }, 0.12) end
     end))
-    jan:Add(btn.Activated:Connect(function()
-        if opts.Callback then task.spawn(opts.Callback) end
+    window._janitor:Add(btn.Activated:Connect(function()
+        if type(callback) == "function" then task.spawn(callback) end
     end))
 
-    return {
+    local handle = {
         Instance = btn,
-        Icon = icon,
-        Owner = libraryOwned and "library" or "script",
-        SetActive = function(_, isActive)
-            active = isActive and true or false
-            Tween(btn, { BackgroundTransparency = active and activeTransparency or normalTransparency }, 0.12)
-            if not hasCustomImage then
-                Tween(icon, { ImageColor3 = active and SilentUI.Theme.Text or SilentUI.Theme.TextDim }, 0.12)
-            end
-        end,
-        Destroy = function()
-            if btn and btn.Parent then btn:Destroy() end
-        end,
+        Icon = image,
+        Fallback = fallback,
+        Kind = kind,
     }
+    function handle:SetActive(isActive)
+        active = isActive == true
+        Tween(btn, { BackgroundTransparency = active and 0.8 or 0.95 }, 0.12)
+        if not customImage and image.Visible then
+            Tween(image, { ImageColor3 = active and SilentUI.Theme.Text or SilentUI.Theme.TextDim }, 0.12)
+        end
+    end
+    function handle:Destroy()
+        if btn.Parent then btn:Destroy() end
+    end
+    table.insert(state.Buttons[kind], handle)
+    if kind == "System" then
+        Private.DockCallbacks[handle] = function(nextCallback)
+            if type(nextCallback) == "function" then callback = nextCallback end
+        end
+    end
+    window._janitor:Add(btn.Destroying:Connect(function()
+        for index = #state.Buttons[kind], 1, -1 do
+            if state.Buttons[kind][index] == handle then
+                table.remove(state.Buttons[kind], index)
+            end
+        end
+        if kind == "System" and opts.Key then
+            state.SystemKeys[opts.Key] = nil
+        end
+        Private.DockCallbacks[handle] = nil
+        if #state.Buttons[kind] == 0 then
+            state.Rows[kind] = nil
+            if kind == "Developer" then window._dock = nil else window._systemDock = nil end
+            if row.Parent then row:Destroy() end
+            if not state.Rows.Developer and not state.Rows.System then
+                if state.Host and state.Host.Parent then state.Host:Destroy() end
+                Private.DockHosts[window] = nil
+                window._dockHost = nil
+                window._dockState = nil
+            else
+                SyncDockSpace(window, state)
+            end
+        end
+    end))
+    return handle
+end
+
+function Window:AddDockButton(opts)
+    -- Public API: developers can only register in Developer Dock.
+    return CreateDockButton(self, "Developer", opts or {})
+end
+
+function Private.AddSystemDockButton(window, opts)
+    opts = opts or {}
+    local key = opts.Key
+    if not SYSTEM_DOCK_KEYS[key] then
+        return nil
+    end
+    local state = EnsureDockHost(window)
+    local current = state.SystemKeys[key]
+    if current and current.Instance and current.Instance.Parent then
+        local updateCallback = Private.DockCallbacks[current]
+        if updateCallback and type(opts.Callback) == "function" then
+            updateCallback(opts.Callback)
+        end
+        return current
+    end
+    opts.Key = key
+    local handle = CreateDockButton(window, "System", opts)
+    state.SystemKeys[key] = handle
+    return handle
 end
 
 Private.CHAT_CODE_FONT = "rbxasset://fonts/families/RobotoMono.json"
@@ -4637,46 +4775,8 @@ function Private.CopyToClipboard(text)
     return false
 end
 
-function Window:AddDiscordDockButton()
-    if self._libraryDiscordDock then return self._libraryDiscordDock end
-    local dock = self:AddDockButton({
-        Name = "SilentUI_DiscordDockButton",
-        Owner = "library",
-        Order = 3,
-        Icon = "messages-square",
-        FallbackText = "D",
-        BackgroundColor3 = Color3.fromRGB(88, 101, 242),
-        BackgroundTransparency = 0.16,
-        IconColor3 = Color3.new(1, 1, 1),
-        FallbackTextColor3 = Color3.new(1, 1, 1),
-        Callback = function()
-            local fixedInvite = SILENTUI_DISCORD_INVITE
-            local opened = Private.OpenExternalURL(fixedInvite)
-            if opened then
-                SilentUI:Notify({ Title = "Discord", Text = "Comunidad de SilentUI abierta.", Type = "success", Duration = 5 })
-            else
-                local copied = Private.CopyToClipboard(fixedInvite)
-                SilentUI:Notify({
-                    Title = "Discord",
-                    Text = copied and "No se pudo abrir; invitación de SilentUI copiada." or ("Abre este enlace manualmente: " .. fixedInvite),
-                    Type = copied and "info" or "warning",
-                    Duration = 8,
-                })
-            end
-        end,
-    })
-    self._libraryDiscordDock = dock
-    return dock
-end
-
 function Window:AddDiscordPanel(opts)
     opts = opts or {}
-    if self._libraryDiscordPanel then
-        if opts.UserInvite ~= nil then
-            self._libraryDiscordPanel:SetCustomInvite(opts.UserInvite)
-        end
-        return self._libraryDiscordPanel
-    end
     local tabObj = self:AddTab({
         Name = opts.Name or "Discord",
         Icon = opts.Icon or "messages-square",
@@ -4737,10 +4837,34 @@ function Window:AddDiscordPanel(opts)
         end,
     })
 
-    -- The fixed shortcut is owned by SilentUI and is independent of the user's invite.
-    local dock = self:AddDiscordDockButton()
+    -- This dock shortcut is intentionally immutable: the library's own invite
+    -- is independent from the optional user-entered invitation in this tab.
+    -- The bundled Lucide catalogue has no Discord brand entry; use SilentUI's existing Discord asset.
+    local discordIcon = SilentUI.DiscordDockIcon
+    local dock = Private.AddSystemDockButton(self, {
+        Key = "Discord",
+        Name = "SilentUI_DiscordDockButton",
+        Image = discordIcon,
+        FallbackGlyph = "D",
+        LayoutOrder = 3,
+        Callback = function()
+            local fixedInvite = SILENTUI_DISCORD_INVITE
+            local opened = Private.OpenExternalURL(fixedInvite)
+            if opened then
+                SilentUI:Notify({ Title = "Discord", Text = "Comunidad de SilentUI abierta.", Type = "success", Duration = 5 })
+            else
+                local copied = Private.CopyToClipboard(fixedInvite)
+                SilentUI:Notify({
+                    Title = "Discord",
+                    Text = copied and "No se pudo abrir; invitación de SilentUI copiada." or ("Abre este enlace manualmente: " .. fixedInvite),
+                    Type = copied and "info" or "warning",
+                    Duration = 8,
+                })
+            end
+        end,
+    })
 
-    local panelHandle = {
+    return {
         Instance = tabObj._group,
         Tab = tabObj,
         DockButton = dock,
@@ -4752,36 +4876,32 @@ function Window:AddDiscordPanel(opts)
         end,
         FixedInvite = SILENTUI_DISCORD_INVITE,
         Destroy = function()
+            if dock and dock.Instance then dock.Instance:Destroy() end
             if tabObj._group then tabObj._group:Destroy() end
         end,
     }
-    self._libraryDiscordPanel = panelHandle
-    return panelHandle
 end
 
 function Window:AddUserSettingsPanel(opts)
     opts = opts or {}
-    if self._librarySettingsPanel then return self._librarySettingsPanel end
     local tabObj = self:AddTab({
-        Name = opts.Name or "Configuración",
-        Icon = "settings-2",
+        Name = opts.Name or "Panel Settings",
+        Icon = opts.Icon or "settings",
         Hidden = true,
     })
 
     tabObj:AddParagraph({
-        Title = opts.Title or "Configuración",
-        Icon = "settings-2",
-        Text = opts.Description or "Ajusta cómo se ve y responde el panel.",
+        Title = opts.Title or "Panel Settings",
+        Icon = "settings",
+        Text = opts.Description or "Personaliza el comportamiento de la interfaz.",
     })
-
-    tabObj:AddSection("Panel", "settings-2")
     tabObj:AddToggle({
-        Text = "Fondo desenfocado",
+        Text = "Background blur",
         Default = SilentUI.Config.Blur ~= false,
         Callback = function(value) SilentUI:SetBlurEnabled(value) end,
     })
     tabObj:AddDropdown({
-        Text = "Idioma",
+        Text = "Language",
         Options = { "English", "Español" },
         Default = SilentUI:GetLanguage() == "es" and "Español" or "English",
         Callback = function(value)
@@ -4789,97 +4909,248 @@ function Window:AddUserSettingsPanel(opts)
         end,
     })
     tabObj:AddButton({
-        Text = "Pantalla completa",
+        Text = "Toggle fullscreen",
         Icon = "maximize",
         Callback = function() self:ToggleFullscreen() end,
     })
+    tabObj:AddButton({
+        Text = "Close panel",
+        Icon = "x",
+        Callback = function() self:Close() end,
+    })
 
-    tabObj:AddSection("Botones flotantes", "app-window")
-    tabObj:AddToggle({
-        Text = "Mostrar botones flotantes",
-        Default = SilentUI.UserSettings.ShowFloatingWidgets,
+    tabObj:AddSection({ Text = "Botones flotantes", Icon = "sliders-horizontal" })
+    local selectedBubble
+    local selectedStateList
+    local selectedStateKey
+    local bubbleDropdown, bubbleVisibleToggle
+    local stateListDropdown, stateVisibleToggle
+    local stateDropdown, stateItemVisibleToggle
+    local lockPositionToggle, touchThroughToggle
+    local bubbleByOption = {}
+    local stateListByOption = {}
+    local stateByOption = {}
+
+    local noItems = "None"
+    local function refreshStateOptions()
+        table.clear(stateByOption)
+        local options = { noItems }
+        if selectedStateList and not selectedStateList._Destroyed and type(selectedStateList.GetItems) == "function" then
+            for _, item in ipairs(selectedStateList:GetItems()) do
+                local label = tostring(item.Id) .. " · " .. tostring(item.Text)
+                stateByOption[label] = item.Id
+                table.insert(options, label)
+            end
+        end
+        if stateDropdown then stateDropdown:SetOptions(options) end
+        if selectedStateKey ~= nil and selectedStateList and not selectedStateList._Destroyed then
+            for _, item in ipairs(selectedStateList:GetItems()) do
+                if item.Id == selectedStateKey then
+                    if stateItemVisibleToggle then stateItemVisibleToggle:Set(item.Visible, true) end
+                    return
+                end
+            end
+        end
+        -- Drop a stale selection when its item or parent list is removed.
+        selectedStateKey = nil
+        if stateItemVisibleToggle then stateItemVisibleToggle:Set(false, true) end
+    end
+
+    bubbleDropdown = tabObj:AddDropdown({
+        Text = "Botón flotante",
+        Options = { noItems },
+        Default = noItems,
         Callback = function(value)
-            SilentUI.UserSettings.ShowFloatingWidgets = value == true
-            for widget in pairs(SilentUI._FloatingWidgets) do
-                if widget._FloatingKind ~= "StateList" and widget.SetVisible then
-                    widget:SetVisible(SilentUI.UserSettings.ShowFloatingWidgets)
+            selectedBubble = bubbleByOption[value]
+            local visible = selectedBubble and selectedBubble:GetVisible() or false
+            if bubbleVisibleToggle then bubbleVisibleToggle:Set(visible, true) end
+        end,
+    })
+    bubbleVisibleToggle = tabObj:AddToggle({
+        Text = "Mostrar botón",
+        Default = false,
+        Callback = function(value)
+            if selectedBubble and not selectedBubble._Destroyed then
+                selectedBubble:SetVisible(value)
+            end
+        end,
+    })
+
+    stateListDropdown = tabObj:AddDropdown({
+        Text = "Mini panel",
+        Options = { noItems },
+        Default = noItems,
+        Callback = function(value)
+            selectedStateList = stateListByOption[value]
+            selectedStateKey = nil
+            refreshStateOptions()
+            if stateVisibleToggle then
+                stateVisibleToggle:Set(selectedStateList and selectedStateList:GetVisible() or false, true)
+            end
+            if lockPositionToggle then
+                lockPositionToggle:Set(selectedStateList and selectedStateList:GetDraggable() == false or false, true)
+            end
+            if touchThroughToggle then
+                touchThroughToggle:Set(selectedStateList and selectedStateList:GetTouchThrough() or false, true)
+            end
+        end,
+    })
+    stateVisibleToggle = tabObj:AddToggle({
+        Text = "Mostrar mini panel",
+        Default = false,
+        Callback = function(value)
+            if selectedStateList and not selectedStateList._Destroyed then
+                selectedStateList:SetVisible(value)
+            end
+        end,
+    })
+
+    stateDropdown = tabObj:AddDropdown({
+        Text = "Estado visible",
+        Options = { noItems },
+        Default = noItems,
+        Callback = function(value)
+            selectedStateKey = stateByOption[value]
+            local items = selectedStateList and selectedStateList:GetItems() or {}
+            for _, item in ipairs(items) do
+                if item.Id == selectedStateKey then
+                    if stateItemVisibleToggle then stateItemVisibleToggle:Set(item.Visible, true) end
+                    break
+                end
+            end
+        end,
+    })
+    stateItemVisibleToggle = tabObj:AddToggle({
+        Text = "Mostrar estado",
+        Default = true,
+        Callback = function(value)
+            if selectedStateList and selectedStateKey ~= nil then
+                selectedStateList:SetItemVisible(selectedStateKey, value)
+            end
+        end,
+    })
+
+    lockPositionToggle = tabObj:AddToggle({
+        Text = "Bloquear posición",
+        Default = false,
+        Callback = function(value)
+            if selectedStateList and not selectedStateList._Destroyed then
+                selectedStateList:SetDraggable(not value)
+            end
+        end,
+    })
+
+    touchThroughToggle = tabObj:AddToggle({
+        Text = "Touch Through",
+        Description = "Permite tocar los botones del juego detrás del mini panel. El panel no se podrá mover mientras esté activo.",
+        Default = false,
+        Callback = function(value)
+            if selectedStateList and not selectedStateList._Destroyed then
+                local ok = selectedStateList:SetTouchThrough(value)
+                if not ok then
+                    if touchThroughToggle then touchThroughToggle:Set(false, true) end
+                    SilentUI:Notify({
+                        Title = "Touch Through",
+                        Text = "Este dispositivo no admite esta opción.",
+                        Type = "warning",
+                    })
+                elseif value and lockPositionToggle then
+                    lockPositionToggle:Set(true, true)
+                elseif not value and lockPositionToggle then
+                    lockPositionToggle:Set(selectedStateList:GetDraggable() == false, true)
                 end
             end
         end,
     })
 
-    tabObj:AddSection("Panel de estado", "list-checks")
-    tabObj:AddToggle({
-        Text = "Mostrar panel de estado",
-        Default = SilentUI.UserSettings.ShowStatePanels,
-        Callback = function(value)
-            SilentUI.UserSettings.ShowStatePanels = value == true
-            for list in pairs(SilentUI._StateLists) do
-                if list.SetVisible then list:SetVisible(value) end
+    local function refreshFloatingOptions()
+        if self._destroyed or not tabObj._group.Parent then return end
+        table.clear(bubbleByOption)
+        table.clear(stateListByOption)
+        local bubbles = { noItems }
+        local stateLists = { noItems }
+        if FloatingInternals and type(FloatingInternals.GetWidgets) == "function" then
+            for _, widget in ipairs(FloatingInternals.GetWidgets("BubbleToggle")) do
+                local frame = FloatingInternals.GetFrame(widget)
+                if frame then
+                    local label = tostring(widget._FloatingOrder) .. " · " .. tostring(frame.Name)
+                    bubbleByOption[label] = widget
+                    table.insert(bubbles, label)
+                end
             end
-        end,
-    })
-    tabObj:AddToggle({
-        Text = "Mostrar estado ON/OFF",
-        Default = SilentUI.UserSettings.ShowStateValues,
-        Callback = function(value)
-            SilentUI.UserSettings.ShowStateValues = value == true
-            for list in pairs(SilentUI._StateLists) do
-                if list.SetStatusVisible then list:SetStatusVisible(value) end
+            for _, widget in ipairs(FloatingInternals.GetWidgets("StateList")) do
+                local frame = FloatingInternals.GetFrame(widget)
+                if frame then
+                    local label = tostring(widget._FloatingOrder) .. " · " .. tostring(frame.Name)
+                    stateListByOption[label] = widget
+                    table.insert(stateLists, label)
+                end
             end
-        end,
-    })
-    tabObj:AddToggle({
-        Text = "Bloquear paneles de estado",
-        Default = SilentUI.UserSettings.LockStatePanels,
-        Callback = function(value)
-            SilentUI.UserSettings.LockStatePanels = value == true
-            for list in pairs(SilentUI._StateLists) do
-                if list.SetLocked then list:SetLocked(value) end
-            end
-        end,
-    })
-    tabObj:AddToggle({
-        Text = "Permitir tocar detrás del panel",
-        Default = SilentUI.UserSettings.StatePanelsPassThrough,
-        Callback = function(value)
-            SilentUI.UserSettings.StatePanelsPassThrough = value == true
-            for list in pairs(SilentUI._StateLists) do
-                if list.SetPassThrough then list:SetPassThrough(value) end
-            end
-        end,
-    })
+        end
+        if bubbleDropdown then bubbleDropdown:SetOptions(bubbles) end
+        if stateListDropdown then stateListDropdown:SetOptions(stateLists) end
+        if selectedBubble and selectedBubble._Destroyed then
+            selectedBubble = nil
+        end
+        if selectedStateList and selectedStateList._Destroyed then
+            selectedStateList = nil
+            selectedStateKey = nil
+        end
+        if selectedBubble and bubbleVisibleToggle then
+            bubbleVisibleToggle:Set(selectedBubble:GetVisible(), true)
+        elseif not selectedBubble and bubbleVisibleToggle then
+            bubbleVisibleToggle:Set(false, true)
+        end
+        if selectedStateList and stateVisibleToggle then
+            stateVisibleToggle:Set(selectedStateList:GetVisible(), true)
+        elseif not selectedStateList and stateVisibleToggle then
+            stateVisibleToggle:Set(false, true)
+        end
+        if selectedStateList and lockPositionToggle then
+            lockPositionToggle:Set(not selectedStateList:GetDraggable(), true)
+        elseif lockPositionToggle then
+            lockPositionToggle:Set(false, true)
+        end
+        if selectedStateList and touchThroughToggle then
+            touchThroughToggle:Set(selectedStateList:GetTouchThrough(), true)
+        elseif touchThroughToggle then
+            touchThroughToggle:Set(false, true)
+        end
+        refreshStateOptions()
+    end
 
-    tabObj:AddButton({
-        Text = "Cerrar panel",
-        Icon = "x",
-        Callback = function() self:Close() end,
-    })
+    local floatingConnection
+    if FloatingInternals and FloatingInternals.Changed then
+        floatingConnection = FloatingInternals.Changed.Connect(function()
+            task.defer(refreshFloatingOptions)
+        end)
+        self._janitor:Add(floatingConnection)
+    end
+    refreshFloatingOptions()
 
-    local dock = self:AddDockButton({
-        Name = "PanelSettingsDockButton",
-        Owner = "library",
-        Order = 2,
-        Icon = "settings-2",
-        FallbackText = "⚙",
+    local dock = Private.AddSystemDockButton(self, {
+        Key = "Configuration",
+        Name = "SilentUI_ConfigurationDockButton",
+        Icon = "settings",
+        FallbackGlyph = "⚙",
+        LayoutOrder = 2,
         Callback = function() tabObj._select() end,
     })
-    local panelHandle = {
+
+    return {
         Instance = tabObj._group,
         Tab = tabObj,
         DockButton = dock,
         Destroy = function()
+            if floatingConnection then floatingConnection:Disconnect() end
             if dock and dock.Instance then dock.Instance:Destroy() end
             if tabObj._group then tabObj._group:Destroy() end
         end,
     }
-    self._librarySettingsPanel = panelHandle
-    return panelHandle
 end
 
 function Window:AddSpotifyPanel(opts)
 	opts = opts or {}
-    if self._librarySpotifyPanel then return self._librarySpotifyPanel end
 	local jan = self._janitor
 	local dockBtn
 	local connectBridge
@@ -6034,11 +6305,12 @@ function Window:AddSpotifyPanel(opts)
 	end))
  
 	jan:Add(function() disconnectBridge(true) end)
-	dockBtn = self:AddDockButton({
-		Owner = "library",
-		Order = 1,
-		Icon = opts.Icon or "Lucide:music-2",
-		FallbackText = "♫",
+	dockBtn = Private.AddSystemDockButton(self, {
+		Key = "Spotify",
+		Name = "SilentUI_SpotifyDockButton",
+		Icon = "music-2",
+		FallbackGlyph = "♫",
+		LayoutOrder = 1,
 		Callback = function() panel.Toggle() end,
 	})
  
@@ -6051,7 +6323,6 @@ function Window:AddSpotifyPanel(opts)
 	else
 		setStatus("Tap Connect, then open the copied browser link", SilentUI.Theme.TextDim)
 	end
-    self._librarySpotifyPanel = panel
 	return panel
 end
  
@@ -15916,7 +16187,7 @@ function SilentUI:CloudService(opts)
 end
  
 -- Shared drag controller for detachable bubbles and state panels.
-local FloatingInternals = {
+FloatingInternals = {
     Registry = {},
     ByFrame = {},
     ActiveDrag = nil,
@@ -15924,6 +16195,7 @@ local FloatingInternals = {
     Gap = 10,
     Margin = 12,
     ReflowQueued = false,
+    Changed = MakeSignal(),
 }
 
 function FloatingInternals.Color(value, fallback)
@@ -15939,6 +16211,19 @@ end
 
 function FloatingInternals.GetFrame(widget)
     return widget and (widget.Instance or widget.Frame)
+end
+
+function FloatingInternals.GetWidgets(kind)
+    local result = {}
+    for widget in pairs(FloatingInternals.Registry) do
+        if not widget._Destroyed and (kind == nil or widget._FloatingKind == kind) then
+            table.insert(result, widget)
+        end
+    end
+    table.sort(result, function(a, b)
+        return (a._FloatingOrder or 0) < (b._FloatingOrder or 0)
+    end)
+    return result
 end
 
 function FloatingInternals.GetViewport()
@@ -16128,7 +16413,7 @@ function FloatingInternals.Reflow(animate)
         -- User-positioned panels remain movable, but are clamped and pushed clear of all others.
         for widget in pairs(FloatingInternals.Registry) do
             local frame = FloatingInternals.GetFrame(widget)
-            if not widget._Destroyed and not widget._FloatingAutoStack and frame and frame.Parent and frame.Visible then
+            if not widget._Destroyed and not widget._FloatingLocked and not widget._FloatingAutoStack and frame and frame.Parent and frame.Visible then
                 local rect = FloatingInternals.GetLogicalRect(frame, globalScale)
                 if rect then FloatingInternals.ResolveCollision(widget, rect.X, rect.Y, false) end
             end
@@ -16143,7 +16428,9 @@ function FloatingInternals.Register(widget, opts, scope)
     FloatingInternals.NextOrder += 1
     widget._FloatingOrder = FloatingInternals.NextOrder
     widget._FloatingAutoStack = opts.AutoStack ~= false
-    widget._FloatingKind = widget._FloatingKind or (widget.Header and "StateList" or "Bubble")
+    widget._FloatingKind = widget._FloatingKind or opts.FloatingKind or "Widget"
+    widget._FloatingDraggable = opts.Draggable ~= false
+    widget._FloatingLocked = false
     local scale = Instance.new("UIScale")
     scale.Name = "SilentFloatingLayoutScale"
     scale.Scale = 1
@@ -16151,55 +16438,45 @@ function FloatingInternals.Register(widget, opts, scope)
     widget._FloatingScale = scale
     FloatingInternals.Registry[widget] = true
     FloatingInternals.ByFrame[frame] = widget
-    SilentUI._FloatingWidgets[widget] = true
-    if widget._FloatingKind == "StateList" then
-        SilentUI._StateLists[widget] = true
-        if widget.SetVisible then widget:SetVisible(SilentUI.UserSettings.ShowStatePanels) end
-        if widget.SetStatusVisible then widget:SetStatusVisible(SilentUI.UserSettings.ShowStateValues) end
-        if widget.SetLocked then widget:SetLocked(widget._FloatingLocked or SilentUI.UserSettings.LockStatePanels) end
-        if widget.SetPassThrough then widget:SetPassThrough(widget._FloatingPassThrough or SilentUI.UserSettings.StatePanelsPassThrough) end
-    elseif widget.SetVisible then
-        widget:SetVisible(SilentUI.UserSettings.ShowFloatingWidgets)
-    end
+
     scope:Add(function()
+        local wasRegistered = FloatingInternals.Registry[widget] == true
         FloatingInternals.Registry[widget] = nil
         FloatingInternals.ByFrame[frame] = nil
-        SilentUI._FloatingWidgets[widget] = nil
-        SilentUI._StateLists[widget] = nil
         if widget._FloatingScale then widget._FloatingScale = nil end
+        if wasRegistered then FloatingInternals.Changed.Fire("destroyed", widget) end
         task.defer(function() FloatingInternals.Reflow(true) end)
     end)
+    scope:Add(frame.Destroying:Connect(function()
+        if not widget._Destroyed and type(widget.Destroy) == "function" then
+            widget:Destroy()
+        end
+    end))
     scope:Add(SilentUI._Root:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
         FloatingInternals.Reflow(false)
     end))
     scope:Add(GlobalScale:GetPropertyChangedSignal("Scale"):Connect(function()
         FloatingInternals.Reflow(false)
     end))
-    -- AutomaticSize.Y can settle after AddItem() and after font/viewport changes.
-    -- Reflow from the final AbsoluteSize so adjacent floating panels never use stale heights.
     scope:Add(frame:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
         FloatingInternals.Reflow(false)
     end))
+    FloatingInternals.Changed.Fire("created", widget)
     task.defer(function() FloatingInternals.Reflow(false) end)
 end
 
 function FloatingInternals.RegisterDrag(handle, frame, onTap, draggable, scope, _allowOffscreen, widget)
     widget = widget or FloatingInternals.ByFrame[frame]
-    handle.Active = not (widget and widget._FloatingPassThrough)
-    handle.Selectable = handle.Active
+    handle.Active = not (widget and widget._FloatingTouchThrough)
+    if widget then widget._FloatingDragHandle = handle end
     scope:Add(handle.InputBegan:Connect(function(input)
-        if widget and (widget._FloatingLocked or widget._FloatingPassThrough) then return end
+        if widget and widget._FloatingTouchThrough then return end
         if FloatingInternals.ActiveDrag then return end
         if input.UserInputType ~= Enum.UserInputType.MouseButton1
             and input.UserInputType ~= Enum.UserInputType.Touch then return end
         local view, scale = FloatingInternals.GetViewport()
         local root = SilentUI._Root
         local pos = (frame.AbsolutePosition - root.AbsolutePosition) / scale
-        if widget then
-            -- AutoStack only controls the initial placement. Once dragged, the
-            -- widget keeps its user-selected position and is no longer reflowed.
-            widget._FloatingAutoStack = false
-        end
         FloatingInternals.ActiveDrag = {
             Input = input,
             Frame = frame,
@@ -16207,7 +16484,7 @@ function FloatingInternals.RegisterDrag(handle, frame, onTap, draggable, scope, 
             Start = Vector2.new(input.Position.X, input.Position.Y),
             Position = pos,
             Moved = false,
-            Draggable = draggable ~= false,
+            Draggable = draggable ~= false and not (widget and (widget._FloatingLocked or widget._FloatingTouchThrough or widget._FloatingDraggable == false)),
             OnTap = onTap,
             EdgeFeedback = false,
         }
@@ -16221,14 +16498,22 @@ end
 
 LibJanitor:Add(UserInputService.InputChanged:Connect(function(input)
     local drag = FloatingInternals.ActiveDrag
-    if not drag or not drag.Draggable then return end
+    if not drag then return end
     local mouse = drag.Input.UserInputType == Enum.UserInputType.MouseButton1
     if (mouse and input.UserInputType ~= Enum.UserInputType.MouseMovement)
         or (not mouse and input ~= drag.Input) then return end
 
     local delta = Vector2.new(input.Position.X, input.Position.Y) - drag.Start
     if delta.Magnitude < 6 and not drag.Moved then return end
+    if not drag.Draggable then
+        drag.Moved = true
+        return
+    end
     drag.Moved = true
+    if drag.Widget then
+        -- AutoStack only controls initial placement. Real user movement takes ownership.
+        drag.Widget._FloatingAutoStack = false
+    end
 
     local view, scale = FloatingInternals.GetViewport()
     local frame = drag.Frame
@@ -16323,8 +16608,8 @@ function SilentUI:CreateBubbleToggle(opts)
 		Instance = bubble,
 		Icon = icon,
 		Scope = scope,
-		_FloatingKind = "Bubble",
 		_Destroyed = false,
+		_FloatingKind = "BubbleToggle",
 	}
 	local source, sourceConnection
 	local function resolveSource()
@@ -16395,8 +16680,14 @@ function SilentUI:CreateBubbleToggle(opts)
 	end
 	function widget:SetImage(value) icon.Image = FloatingInternals.Image(value) end
 	function widget:SetVisible(visible)
+		if self._Destroyed then return false end
 		bubble.Visible = visible == true
+		FloatingInternals.Changed.Fire("visibility", self)
 		FloatingInternals.Reflow(true)
+		return true
+	end
+	function widget:GetVisible()
+		return not self._Destroyed and bubble.Visible
 	end
 	function widget:SetPosition(position)
 		assert(typeof(position) == "UDim2", "SetPosition expects UDim2")
@@ -16411,8 +16702,6 @@ function SilentUI:CreateBubbleToggle(opts)
 	function widget:Destroy()
 		if self._Destroyed then return end
 		self._Destroyed = true
-		FloatingInternals.Registry[self] = nil
-		FloatingInternals.ByFrame[bubble] = nil
 		if sourceConnection then sourceConnection:Disconnect(); sourceConnection = nil end
 		scope:Destroy()
 		task.defer(function() FloatingInternals.Reflow(true) end)
@@ -16486,8 +16775,6 @@ function SilentUI:CreateStateList(opts)
 	header.LayoutOrder = 0
 	header.ZIndex = panel.ZIndex + 1
 	header.Parent = panel
-	panel.Active = false
-	panel.Selectable = false
 	if opts.TitleKey then self:Localize(header, opts.TitleKey) end
 	local items = {}
 	local nextOrder = 0
@@ -16495,47 +16782,9 @@ function SilentUI:CreateStateList(opts)
 		Instance = panel,
 		Header = header,
 		Scope = scope,
-		_FloatingKind = "StateList",
-		_FloatingLocked = opts.Locked == true,
-		_FloatingPassThrough = opts.PassThrough == true,
-		_FloatingDraggable = opts.Draggable ~= false,
-		_StatusVisible = opts.ShowStatus ~= false and SilentUI.UserSettings.ShowStateValues,
 		_Destroyed = false,
+		_FloatingKind = "StateList",
 	}
-	local function refreshHeaderInput()
-		-- InputSink.None lets touches reach the game beneath this state panel.
-		header.Active = not list._FloatingPassThrough
-		header.Selectable = not list._FloatingPassThrough
-		pcall(function()
-			header.InputSink = list._FloatingPassThrough and Enum.InputSink.None or Enum.InputSink.Activate
-		end)
-		pcall(function() panel.InputSink = Enum.InputSink.None end)
-	end
-	refreshHeaderInput()
-	function list:SetLocked(value)
-		self._FloatingLocked = value == true
-		if self._FloatingLocked and FloatingInternals.ActiveDrag
-			and FloatingInternals.ActiveDrag.Widget == self then
-			FloatingInternals.ActiveDrag = nil
-		end
-		return true
-	end
-	function list:SetPassThrough(value)
-		self._FloatingPassThrough = value == true
-		if self._FloatingPassThrough and FloatingInternals.ActiveDrag
-			and FloatingInternals.ActiveDrag.Widget == self then
-			FloatingInternals.ActiveDrag = nil
-		end
-		refreshHeaderInput()
-		return true
-	end
-	function list:SetStatusVisible(value)
-		self._StatusVisible = value == true
-		for _, entry in pairs(items) do
-			if entry.Status then entry.Status.Visible = self._StatusVisible end
-		end
-		return true
-	end
 	local function boolState(value)
 		if type(value) == "boolean" then return value end
 		if type(value) == "table" then
@@ -16624,14 +16873,14 @@ function SilentUI:CreateStateList(opts)
 		status.Position = UDim2.new(1, -44, 0, 0)
 		status.Size = UDim2.new(0, 44, 1, 0)
 		status.ZIndex = row.ZIndex + 1
-		status.Visible = list._StatusVisible
 		status.Parent = row
 		local entry = {
 			Info = info, Row = row, Label = textLabel, Dot = dot,
-			Status = status, ManualState = info.Default == true,
+			Status = status, ManualState = info.Default == true, Visible = true,
 		}
 		items[key] = entry
 		refreshEntry(entry)
+		FloatingInternals.Changed.Fire("items", list)
 		task.defer(function() FloatingInternals.Reflow(false) end)
 		return key
 	end
@@ -16641,6 +16890,7 @@ function SilentUI:CreateStateList(opts)
 		items[tostring(key)] = nil
 		if entry.Connection then entry.Connection:Disconnect() end
 		entry.Row:Destroy()
+		FloatingInternals.Changed.Fire("items", list)
 		task.defer(function() FloatingInternals.Reflow(false) end)
 		return true
 	end
@@ -16649,6 +16899,35 @@ function SilentUI:CreateStateList(opts)
 		if not entry then return false end
 		entry.ManualState = value == true
 		refreshEntry(entry)
+		return true
+	end
+	function list:GetItems()
+		local result = {}
+		for key, entry in pairs(items) do
+			table.insert(result, {
+				Id = key,
+				Text = tostring(entry.Info.Text or entry.Info.Label or entry.Info.Flag or key),
+				Visible = entry.Visible ~= false,
+				Active = entry.Active == true,
+			})
+		end
+		table.sort(result, function(a, b) return a.Id < b.Id end)
+		return result
+	end
+	function list:SetItemVisible(key, visible)
+		local entry = items[tostring(key)]
+		if not entry then return false end
+		visible = visible == true
+		entry.Visible = visible
+		if visible then
+			if entry.Row.Parent ~= panel then entry.Row.Parent = panel end
+			entry.Row.Visible = true
+		else
+			entry.Row.Visible = false
+			entry.Row.Parent = nil
+		end
+		FloatingInternals.Changed.Fire("item-visibility", list)
+		task.defer(function() FloatingInternals.Reflow(false) end)
 		return true
 	end
 	function list:SetColor(value)
@@ -16668,11 +16947,119 @@ function SilentUI:CreateStateList(opts)
 		self:Refresh()
 	end
 	function list:SetVisible(value)
+		if self._Destroyed then return false end
 		panel.Visible = value == true
+		FloatingInternals.Changed.Fire("visibility", self)
 		FloatingInternals.Reflow(true)
+		return true
+	end
+	function list:GetVisible()
+		return not self._Destroyed and panel.Visible
+	end
+	function list:GetDraggable()
+		return not self._FloatingLocked and self._FloatingDraggable ~= false
+	end
+	function list:SetDraggable(enabled)
+		if self._Destroyed then return false end
+		enabled = enabled == true
+		if self._FloatingTouchThrough then
+			-- Keep the user's preferred drag state for when Touch Through is disabled.
+			self._TouchThroughPreviousDraggable = enabled
+			self._FloatingLocked = true
+			self._FloatingDraggable = false
+		else
+			self._FloatingLocked = not enabled
+			self._FloatingDraggable = enabled
+		end
+		if not enabled then self._FloatingAutoStack = false end
+		if self._FloatingDragHandle then
+			self._FloatingDragHandle.Active = not self._FloatingTouchThrough
+		end
+		local drag = FloatingInternals.ActiveDrag
+		if drag and drag.Widget == self then
+			drag.Draggable = enabled and not self._FloatingTouchThrough and not self._FloatingLocked
+		end
+		FloatingInternals.Changed.Fire("drag-state", self)
+		return true
+	end
+	function list:GetTouchThrough()
+		return self._FloatingTouchThrough == true
+	end
+	function list:SetTouchThrough(enabled)
+		if self._Destroyed then return false end
+		enabled = enabled == true
+		if self._FloatingTouchThrough == enabled then return true end
+		if enabled then
+			local inputSinkNone
+			local supportsInputSink = pcall(function()
+				inputSinkNone = Enum.InputSink.None
+				local _ = panel.InputSink
+			end)
+			if not supportsInputSink or inputSinkNone == nil then
+				return false, "Touch Through is not supported by this client"
+			end
+		end
+
+		if enabled then
+			self._TouchThroughPreviousDraggable = self:GetDraggable()
+			self:SetDraggable(false)
+			self._FloatingTouchThrough = true
+			if self._FloatingDragHandle then self._FloatingDragHandle.Active = false end
+			local activeDrag = FloatingInternals.ActiveDrag
+			if activeDrag and activeDrag.Widget == self then
+				FloatingInternals.ActiveDrag = nil
+			end
+		else
+			self._FloatingTouchThrough = false
+			local restoreDraggable = self._TouchThroughPreviousDraggable
+			self._TouchThroughPreviousDraggable = nil
+			self:SetDraggable(restoreDraggable ~= false)
+		end
+
+		self._TouchThroughCache = self._TouchThroughCache or {}
+		if enabled then
+			table.clear(self._TouchThroughCache)
+			local inputSinkNone = Enum.InputSink.None
+			local guiObjects = { panel }
+			for _, descendant in ipairs(panel:GetDescendants()) do
+				if descendant:IsA("GuiObject") then
+					table.insert(guiObjects, descendant)
+				end
+			end
+			for _, guiObject in ipairs(guiObjects) do
+				local saved = {}
+				local okActive, oldActive = pcall(function() return guiObject.Active end)
+				if okActive then saved.Active = oldActive end
+				local okInteractable, oldInteractable = pcall(function() return guiObject.Interactable end)
+				if okInteractable then saved.Interactable = oldInteractable end
+				local okSink, oldSink = pcall(function() return guiObject.InputSink end)
+				if okSink then saved.InputSink = oldSink end
+				self._TouchThroughCache[guiObject] = saved
+				pcall(function() guiObject.Active = false end)
+				pcall(function() guiObject.Interactable = false end)
+				if inputSinkNone ~= nil and okSink then
+					pcall(function() guiObject.InputSink = inputSinkNone end)
+				end
+			end
+		else
+			for guiObject, saved in pairs(self._TouchThroughCache) do
+				if guiObject and guiObject.Parent then
+					if saved.Active ~= nil then pcall(function() guiObject.Active = saved.Active end) end
+					if saved.Interactable ~= nil then pcall(function() guiObject.Interactable = saved.Interactable end) end
+					if saved.InputSink ~= nil then pcall(function() guiObject.InputSink = saved.InputSink end) end
+				end
+			end
+			table.clear(self._TouchThroughCache)
+			if self._FloatingDragHandle then
+				self._FloatingDragHandle.Active = not self._FloatingTouchThrough
+			end
+		end
+		FloatingInternals.Changed.Fire("touch-through", self)
+		return true
 	end
 	function list:SetPosition(position)
 		assert(typeof(position) == "UDim2", "SetPosition expects UDim2")
+		if self._FloatingLocked then return false end
 		if self._FloatingAutoStack then
 			panel.Position = position
 			FloatingInternals.Reflow(true)
@@ -16687,10 +17074,9 @@ function SilentUI:CreateStateList(opts)
 	function list:Destroy()
 		if self._Destroyed then return end
 		self._Destroyed = true
-		FloatingInternals.Registry[self] = nil
-		FloatingInternals.ByFrame[panel] = nil
 		for _, entry in pairs(items) do
 			if entry.Connection then entry.Connection:Disconnect() end
+			if entry.Row then entry.Row:Destroy() end
 		end
 		table.clear(items)
 		scope:Destroy()
@@ -16702,6 +17088,7 @@ function SilentUI:CreateStateList(opts)
 		FloatingInternals.ByFrame[panel] = nil
 		for _, entry in pairs(items) do
 			if entry.Connection then entry.Connection:Disconnect() end
+			if entry.Row then entry.Row:Destroy() end
 		end
 		table.clear(items)
 	end)
