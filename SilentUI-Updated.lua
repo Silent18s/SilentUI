@@ -29,10 +29,12 @@ SilentUI._Windows = {}
     SILENTUI
     Change these values before distributing the library.
     Background.Image accepts an asset ID, rbxassetid:// reference or HTTPS image URL.
-    Leave Discord.Invite empty to use the built-in SilentUI invitation.
+    The fixed Discord dock link belongs to SilentUI; users can enter their own link in the Discord tab.
 ]]
 
-SilentUI.DefaultDiscordInvite = "https://discord.gg/k3SVsV7sXs"
+local SILENTUI_DISCORD_INVITE = "https://discord.gg/k3SVsV7sXs"
+SilentUI.DefaultDiscordInvite = SILENTUI_DISCORD_INVITE
+SilentUI.DiscordDockIcon = "rbxassetid://18505728250" -- Roblox decal listing: circular Discord mark
 SilentUI.Defaults = {
     Title = "SilentUI",
     Subtitle = "Community UI Library",
@@ -42,9 +44,7 @@ SilentUI.Defaults = {
         LauncherTransparency = 0.18,
         UseImageAccent = false,
     },
-    Discord = {
-        Invite = "",
-    },
+    Discord = {},
 }
  
 function Private.GetGlobalTable()
@@ -4086,8 +4086,10 @@ function Window:AddDockButton(opts)
  
 	local icon = Instance.new("ImageLabel")
 	icon.BackgroundTransparency = 1
-	icon.Image = opts.Icon and ResolveIcon(opts.Icon) or ""
-	icon.ImageColor3 = SilentUI.Theme.TextDim
+	local hasCustomImage = type(opts.Image) == "string" and opts.Image ~= ""
+	icon.Image = hasCustomImage and opts.Image or (opts.Icon and ResolveIcon(opts.Icon) or "")
+	icon.ImageColor3 = hasCustomImage and Color3.new(1, 1, 1) or SilentUI.Theme.TextDim
+	if hasCustomImage then icon:SetAttribute("SilentThemeColorExempt", true) end
 	icon.Size = UDim2.fromOffset(15, 15)
 	icon.AnchorPoint = Vector2.new(0.5, 0.5)
 	icon.Position = UDim2.fromScale(0.5, 0.5)
@@ -4099,12 +4101,12 @@ function Window:AddDockButton(opts)
 	jan:Add(btn.MouseEnter:Connect(function()
 		if active then return end
 		Tween(btn, { BackgroundTransparency = 0.85 }, 0.12)
-		Tween(icon, { ImageColor3 = SilentUI.Theme.Text }, 0.12)
+		if not hasCustomImage then Tween(icon, { ImageColor3 = SilentUI.Theme.Text }, 0.12) end
 	end))
 	jan:Add(btn.MouseLeave:Connect(function()
 		if active then return end
 		Tween(btn, { BackgroundTransparency = 0.95 }, 0.12)
-		Tween(icon, { ImageColor3 = SilentUI.Theme.TextDim }, 0.12)
+		if not hasCustomImage then Tween(icon, { ImageColor3 = SilentUI.Theme.TextDim }, 0.12) end
 	end))
 	jan:Add(btn.MouseButton1Click:Connect(function()
 		if opts.Callback then task.spawn(opts.Callback) end
@@ -4116,7 +4118,9 @@ function Window:AddDockButton(opts)
 		SetActive = function(_, isActive)
 			active = isActive and true or false
 			Tween(btn, { BackgroundTransparency = active and 0.8 or 0.95 }, 0.12)
-			Tween(icon, { ImageColor3 = active and SilentUI.Theme.Text or SilentUI.Theme.TextDim }, 0.12)
+			if not hasCustomImage then
+				Tween(icon, { ImageColor3 = active and SilentUI.Theme.Text or SilentUI.Theme.TextDim }, 0.12)
+			end
 		end,
 	}
 end
@@ -4384,75 +4388,119 @@ function Window:AddBackgroundPanel(opts)
 end
 
 function Private.OpenExternalURL(url)
-    if type(url) ~= "string" or not url:match("^https://") then
+    if type(url) ~= "string" or not url:match("^https?://") then
         return false, "invalid external URL"
     end
 
-    local globals = Private.GetGlobalTable()
     local candidates = {}
-    local seen = {}
-    local function addCandidate(fn, owner)
-        if type(fn) ~= "function" or seen[fn] then return end
-        seen[fn] = true
-        table.insert(candidates, { Function = fn, Owner = owner })
+    local environments = {}
+    local seenEnvironment = {}
+    local seenFunctions = {}
+
+    local function addEnvironment(environment)
+        if type(environment) ~= "table" or seenEnvironment[environment] then return end
+        seenEnvironment[environment] = true
+        table.insert(environments, environment)
     end
+
+    -- Executors do not share a standard browser-opening API. Inspect the
+    -- common execution environments instead of assuming getgenv is the only one.
+    addEnvironment(Private.GetGlobalTable())
+    addEnvironment(_G)
+    pcall(function() if type(getgenv) == "function" then addEnvironment(getgenv()) end end)
+    pcall(function() if type(getfenv) == "function" then addEnvironment(getfenv(0)); addEnvironment(getfenv(1)) end end)
+    pcall(function() if type(getrenv) == "function" then addEnvironment(getrenv()) end end)
+    pcall(function() if type(getrenv) == "table" then addEnvironment(getrenv) end end)
 
     local aliases = {
         "openurl", "open_url", "openUrl", "OpenURL", "OpenUrl", "openURL",
         "openlink", "open_link", "openLink", "OpenLink",
         "openexternalurl", "open_external_url", "openExternalURL", "openExternalUrl", "OpenExternalURL",
+        "openexternallink", "open_external_link", "openExternalLink", "OpenExternalLink",
         "openbrowser", "open_browser", "openBrowser", "OpenBrowser",
+        "openbrowserurl", "open_browser_url", "openBrowserUrl", "OpenBrowserUrl",
+        "openbrowserwindow", "open_browser_window", "openBrowserWindow", "OpenBrowserWindow",
         "openexternal", "open_external", "openExternal", "OpenExternal",
         "openwebsite", "open_website", "openWebsite", "OpenWebsite",
         "launchurl", "launch_url", "launchURL", "LaunchURL",
+        "launchbrowser", "launch_browser", "launchBrowser", "LaunchBrowser",
+        "launchbrowserurl", "launch_browser_url", "LaunchBrowserUrl",
         "visiturl", "visit_url", "visitURL", "VisitURL",
-        "browse", "Browse", "openInBrowser", "open_in_browser",
-        "openURLAsync", "OpenURLAsync", "urlopen", "url_open",
+        "browse", "Browse", "browser_open", "open_browser_url", "openInBrowser", "open_in_browser", "open_url_in_browser",
+        "openuri", "open_uri", "openURI", "OpenURI", "urlopen", "url_open", "openUrlExternal",
     }
 
-    for _, name in ipairs(aliases) do
-        addCandidate(globals[name])
-        addCandidate(hasFn(name))
+    local function addCandidate(fn, owner, name)
+        if type(fn) ~= "function" then return end
+        local owners = seenFunctions[fn]
+        if not owners then owners = {}; seenFunctions[fn] = owners end
+        if owners[owner or false] then return end
+        owners[owner or false] = true
+        table.insert(candidates, { Function = fn, Owner = owner, Name = name })
     end
 
-    local namespaces = {
-        globals.syn, globals.http, globals.fluxus, globals.Fluxus,
-        globals.xeno, globals.Xeno, globals.delta, globals.Delta,
-        globals.krnl, globals.KRNL, globals.electron, globals.Electron,
-        globals.synapse, globals.Synapse, globals.executor, globals.Executor,
-        globals.browser, globals.Browser, globals.linking, globals.Linking,
+    local namespaceNames = {
+        "syn", "Syn", "synapse", "Synapse", "synapsez", "SynapseZ",
+        "fluxus", "Fluxus", "xeno", "Xeno", "delta", "Delta", "krnl", "KRNL",
+        "electron", "Electron", "wave", "Wave", "solara", "Solara", "hydrogen", "Hydrogen",
+        "arceus", "Arceus", "arceusx", "ArceusX", "celery", "Celery", "comet", "Comet",
+        "krampus", "Krampus", "scriptware", "ScriptWare", "swift", "Swift", "codex", "Codex",
+        "evon", "Evon", "trigon", "Trigon", "oxygen", "Oxygen", "executor", "Executor",
+        "browser", "Browser", "web", "Web", "http", "HTTP", "linking", "Linking",
+        "platform", "Platform", "client", "Client", "native", "Native", "system", "System",
+        "misc", "Misc", "ui", "UI", "os", "OS",
     }
-    for _, namespace in ipairs(namespaces) do
-        if type(namespace) == "table" then
-            for _, name in ipairs(aliases) do
-                addCandidate(namespace[name], namespace)
+
+    for _, environment in ipairs(environments) do
+        for _, name in ipairs(aliases) do
+            addCandidate(environment[name], nil, name)
+        end
+        for _, namespaceName in ipairs(namespaceNames) do
+            local namespace = environment[namespaceName]
+            if type(namespace) == "table" then
+                for _, name in ipairs(aliases) do
+                    addCandidate(namespace[name], namespace, namespaceName .. "." .. name)
+                end
             end
         end
     end
 
-    -- Some executors expose a proxy for Roblox's LinkingService:OpenUrl.
-    local okService, linkingService = pcall(function()
-        return game:GetService("LinkingService")
+    -- Some executor builds expose a LinkingService proxy. This is not a
+    -- documented general Roblox browser API, so it is treated as best-effort.
+    pcall(function()
+        local linkingService = game:GetService("LinkingService")
+        if linkingService then
+            addCandidate(linkingService.OpenUrl, linkingService, "LinkingService.OpenUrl")
+            addCandidate(linkingService.openUrl, linkingService, "LinkingService.openUrl")
+        end
     end)
-    if okService and linkingService then
-        addCandidate(linkingService.OpenUrl, linkingService)
-        addCandidate(linkingService.openUrl, linkingService)
-    end
+
+    -- Legacy Roblox browser entry points. These are RobloxScriptSecurity APIs
+    -- (and deprecated), so ordinary LocalScripts cannot call them. Some executor
+    -- contexts may expose them; pcall keeps this optional and non-fatal.
+    pcall(function()
+        local guiService = game:GetService("GuiService")
+        if guiService then
+            addCandidate(guiService.OpenBrowserWindow, guiService, "GuiService.OpenBrowserWindow (legacy)")
+        end
+    end)
 
     for _, candidate in ipairs(candidates) do
         local ok, result
         if candidate.Owner then
-            ok, result = pcall(candidate.Function, candidate.Owner, url)
+            -- Most executor globals are plain functions stored on a table, not
+            -- colon methods. Try URL-first so the URL is not shifted into `self`.
+            ok, result = pcall(candidate.Function, url)
             if not ok or result == false then
-                ok, result = pcall(candidate.Function, url)
+                ok, result = pcall(candidate.Function, candidate.Owner, url)
             end
         else
             ok, result = pcall(candidate.Function, url)
         end
-        if ok and result ~= false then return true end
+        if ok and result ~= false then return true, candidate.Name end
     end
 
-    return false, "this executor does not expose a compatible external URL opener"
+    return false, "no compatible external URL opener was exposed by this executor"
 end
 
 function Private.CopyToClipboard(text)
@@ -4484,50 +4532,99 @@ end
 
 function Window:AddDiscordPanel(opts)
     opts = opts or {}
-    local discordDefaults = SilentUI.Defaults.Discord or {}
-    local invite = tostring(opts.Invite or discordDefaults.Invite or "")
-    if invite == "" then invite = SilentUI.DefaultDiscordInvite end
-
     local tabObj = self:AddTab({
         Name = opts.Name or "Discord",
         Icon = opts.Icon or "messages-square",
-        Hidden = true,
+        Hidden = opts.Hidden == true,
     })
+
     tabObj:AddParagraph({
         Title = opts.Title or "Discord",
         Icon = "messages-square",
-        Text = opts.Description or "Comunidad y soporte de SilentUI.",
+        Text = opts.Description or "Acceso a la comunidad de SilentUI y un enlace personal opcional.",
     })
-    local inviteButton = tabObj:AddButton({
-        Text = opts.ButtonText or "Abrir Discord",
-        Description = "Abre la invitación configurada para este panel.",
+
+    local customInvite = tostring(opts.UserInvite or "")
+    tabObj:AddTextbox({
+        Text = "Tu invitación de Discord",
+        Description = "Opcional. Este enlace solo se usa desde este panel; no cambia el acceso fijo de SilentUI.",
+        Placeholder = "https://discord.gg/tu-invitacion",
+        Default = customInvite,
+        Callback = function(value)
+            customInvite = tostring(value or "")
+        end,
+    })
+
+    local function validDiscordInvite(value)
+        value = tostring(value or ""):match("^%s*(.-)%s*$")
+        if value == "" then return false end
+        return value:match("^https://discord%.gg/[A-Za-z0-9%-_]+/?$") ~= nil
+            or value:match("^https://discord%.com/invite/[A-Za-z0-9%-_]+/?$") ~= nil
+    end
+
+    local customInviteButton = tabObj:AddButton({
+        Text = "Abrir mi invitación",
+        Description = "Abre el enlace personal que escribiste arriba.",
         Icon = "external-link",
         Callback = function()
+            local invite = tostring(customInvite or ""):match("^%s*(.-)%s*$")
+            if not validDiscordInvite(invite) then
+                SilentUI:Notify({
+                    Title = "Discord",
+                    Text = "Introduce una invitación válida de discord.gg o discord.com/invite.",
+                    Type = "warning",
+                    Duration = 6,
+                })
+                return
+            end
             local opened = Private.OpenExternalURL(invite)
             if opened then
-                SilentUI:Notify({ Title = "Discord", Text = "Invitación abierta.", Type = "success", Duration = 5 })
+                SilentUI:Notify({ Title = "Discord", Text = "Invitación personal abierta.", Type = "success", Duration = 5 })
             else
                 local copied = Private.CopyToClipboard(invite)
                 SilentUI:Notify({
                     Title = "Discord",
-                    Text = copied and "No se pudo abrir; enlace copiado." or ("No se pudo abrir el enlace: " .. invite),
+                    Text = copied and "No se pudo abrir; enlace personal copiado." or ("No se pudo abrir el enlace: " .. invite),
                     Type = copied and "info" or "warning",
                     Duration = 8,
                 })
             end
         end,
     })
+
+    -- This dock shortcut is intentionally immutable: the library's own invite
+    -- is independent from the optional user-entered invitation in this tab.
     local dock = self:AddDockButton({
-        Name = "DiscordDockButton",
-        Icon = opts.Icon or "messages-square",
-        Callback = function() tabObj._select() end,
+        Name = "SilentUI_DiscordDockButton",
+        Image = SilentUI.DiscordDockIcon,
+        Callback = function()
+            local fixedInvite = SILENTUI_DISCORD_INVITE
+            local opened = Private.OpenExternalURL(fixedInvite)
+            if opened then
+                SilentUI:Notify({ Title = "Discord", Text = "Comunidad de SilentUI abierta.", Type = "success", Duration = 5 })
+            else
+                local copied = Private.CopyToClipboard(fixedInvite)
+                SilentUI:Notify({
+                    Title = "Discord",
+                    Text = copied and "No se pudo abrir; invitación de SilentUI copiada." or ("Abre este enlace manualmente: " .. fixedInvite),
+                    Type = copied and "info" or "warning",
+                    Duration = 8,
+                })
+            end
+        end,
     })
+
     return {
         Instance = tabObj._group,
         Tab = tabObj,
         DockButton = dock,
-        Invite = inviteButton,
-        URL = invite,
+        CustomInvite = customInviteButton,
+        GetCustomInvite = function() return customInvite end,
+        SetCustomInvite = function(_, value)
+            customInvite = tostring(value or "")
+            return validDiscordInvite(customInvite)
+        end,
+        FixedInvite = SILENTUI_DISCORD_INVITE,
         Destroy = function()
             if dock and dock.Instance then dock.Instance:Destroy() end
             if tabObj._group then tabObj._group:Destroy() end
@@ -8101,8 +8198,10 @@ function Tab:AddSubTab(nameOrOpts)
  
 		self._subTabBody = Instance.new("Frame")
 		self._subTabBody.Name = "SubTabBody"
-		self._subTabBody.Size = UDim2.new(1, -4, 1, -62)
-		self._subTabBody.Position = UDim2.fromOffset(2, 56)
+		-- Keep a clear visual gutter below the subtab bar and its scroll track.
+		-- This prevents the first card/paragraph text from visually touching the tab labels on small screens.
+		self._subTabBody.Size = UDim2.new(1, -4, 1, -70)
+		self._subTabBody.Position = UDim2.fromOffset(2, 64)
 		self._subTabBody.BackgroundTransparency = 1
 		self._subTabBody.BorderSizePixel = 0
 		self._subTabBody.ClipsDescendants = true
